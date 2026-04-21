@@ -1,0 +1,80 @@
+{
+  "mission": {
+    "name": "Odyssey Return",
+    "spacecraft": "DSV Odyssey",
+    "departure": "Mars",
+    "destination": "Earth",
+    "start_date": "2087-03-15T00:00:00Z",
+    "initial_fuel_kg": 500.0,
+    "crew_size": 6
+  },
+  "simulation": {
+    "tick_interval_s": 300,
+    "time_scale": 1.0,
+    "telemetry_rate_hz": 1.0,
+    "hazard_spawn_probability": 0.0005,
+    "sensor_noise_level": 0.001,
+    "per_second_lakebase_writes": true
+  },
+  "physics": {
+    "integration_method": "velocity_verlet",
+    "spacecraft_dry_mass_kg": 5000.0,
+    "exhaust_velocity_km_s": 3.0,
+    "safety_margin_km": 100.0
+  },
+  "autopilot": {
+    "enabled": true,
+    "emergency_evasion_threshold_km": 500.0,
+    "max_evasion_delta_v_km_s": 0.5,
+    "station_keeping_max_delta_v_km_s": 0.01,
+    "fuel_safe_mode_threshold_kg": 100.0,
+    "fuel_emergency_only_threshold_kg": 50.0,
+    "can_query_model_serving": true,
+    "log_all_decisions": true
+  },
+  "command_execution": {
+    "validate_at_receipt_time": true,
+    "emergency_reserve_fuel_kg": 50.0,
+    "max_queue_depth": 10,
+    "batch_non_urgent": true
+  },
+  "agents": {
+    "flight_dynamics": {
+      "description": "Evaluates trajectory options and suggests corrections",
+      "model": "databricks-meta-llama-3-3-70b-instruct",
+      "max_iterations": 8,
+      "temperature": 0.1
+    },
+    "hazard_assessment": {
+      "description": "Identifies and ranks hazard threats",
+      "model": "databricks-meta-llama-3-3-70b-instruct",
+      "max_iterations": 8,
+      "temperature": 0.1
+    },
+    "communications": {
+      "description": "Calculates delay-adjusted commands",
+      "model": "databricks-meta-llama-3-3-70b-instruct",
+      "max_iterations": 6,
+      "temperature": 0.1
+    },
+    "mission_commander": {
+      "description": "Aggregates outputs and generates final recommendations",
+      "model": "databricks-meta-llama-3-3-70b-instruct",
+      "max_iterations": 10,
+      "temperature": 0.2
+    }
+  },
+  "training": {
+    "multi_profile_enabled": true,
+    "profile_count": 11,
+    "hours_per_profile": 24,
+    "stratified_splits": true
+  },
+  "throughput_tracking": {
+    "enabled": true,
+    "track_lakebase_writes_per_sec": true,
+    "track_delta_writes_per_sec": true,
+    "track_model_inference_latency": true,
+    "dashboard_refresh_interval_s": 5
+  }
+}

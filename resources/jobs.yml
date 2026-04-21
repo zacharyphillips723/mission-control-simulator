@@ -1,0 +1,160 @@
+resources:
+  jobs:
+    mission_control_setup:
+      name: "[${bundle.target}] Mission Control — Setup"
+      description: "Creates catalog, schemas, Delta tables, Lakebase tables, and generates initial telemetry"
+      tags:
+        project: mission-control-simulator
+      tasks:
+        - task_key: setup_catalog
+          notebook_task:
+            notebook_path: ../src/notebooks/00_setup_catalog.py
+            base_parameters:
+              catalog: ${var.catalog}
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+        - task_key: setup_delta_tables
+          depends_on:
+            - task_key: setup_catalog
+          notebook_task:
+            notebook_path: ../src/notebooks/01_setup_delta_tables.py
+            base_parameters:
+              catalog: ${var.catalog}
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+        - task_key: setup_lakebase
+          depends_on:
+            - task_key: setup_catalog
+          notebook_task:
+            notebook_path: ../src/notebooks/02_setup_lakebase.py
+            base_parameters:
+              catalog: ${var.catalog}
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+        - task_key: seed_celestial_bodies
+          depends_on:
+            - task_key: setup_delta_tables
+          notebook_task:
+            notebook_path: ../src/notebooks/05_seed_celestial_bodies.py
+            base_parameters:
+              catalog: ${var.catalog}
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+        - task_key: generate_telemetry
+          depends_on:
+            - task_key: setup_delta_tables
+            - task_key: setup_lakebase
+            - task_key: seed_celestial_bodies
+          notebook_task:
+            notebook_path: ../src/notebooks/03_generate_telemetry.py
+            base_parameters:
+              catalog: ${var.catalog}
+              duration_hours: "24"
+              batch_size_s: "3600"
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+        - task_key: train_models
+          depends_on:
+            - task_key: generate_telemetry
+          notebook_task:
+            notebook_path: ../src/notebooks/06_train_models.py
+            base_parameters:
+              catalog: ${var.catalog}
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+        - task_key: deploy_agents
+          depends_on:
+            - task_key: train_models
+          notebook_task:
+            notebook_path: ../src/notebooks/07_deploy_agents.py
+            base_parameters:
+              catalog: ${var.catalog}
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+    mission_control_simulation_loop:
+      name: "[${bundle.target}] Mission Control — Simulation Loop"
+      description: "Closed-loop simulation: spacecraft tick → ground tick → agent decisions → command transmission"
+      tags:
+        project: mission-control-simulator
+      schedule:
+        quartz_cron_expression: "0 */5 * * * ?"
+        timezone_id: UTC
+      tasks:
+        - task_key: spacecraft_tick
+          notebook_task:
+            notebook_path: ../src/notebooks/04b_spacecraft_tick.py
+            base_parameters:
+              catalog: ${var.catalog}
+              tick_duration_s: "300"
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+        - task_key: ground_tick
+          depends_on:
+            - task_key: spacecraft_tick
+          notebook_task:
+            notebook_path: ../src/notebooks/04_simulation_tick.py
+            base_parameters:
+              catalog: ${var.catalog}
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+        - task_key: agent_decision_loop
+          depends_on:
+            - task_key: ground_tick
+          notebook_task:
+            notebook_path: ../src/notebooks/08_agent_decision_loop.py
+            base_parameters:
+              catalog: ${var.catalog}
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER
+
+        - task_key: command_transmission
+          depends_on:
+            - task_key: agent_decision_loop
+          notebook_task:
+            notebook_path: ../src/notebooks/09_transmit_commands.py
+            base_parameters:
+              catalog: ${var.catalog}
+          new_cluster:
+            spark_version: 16.2.x-scala2.12
+            num_workers: 0
+            node_type_id: i3.xlarge
+            data_security_mode: SINGLE_USER

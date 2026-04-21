@@ -1,0 +1,31 @@
+bundle:
+  name: mission-control-simulator
+
+variables:
+  catalog:
+    description: "Unity Catalog catalog name for mission control data"
+    default: mission_control
+  warehouse_id:
+    description: "SQL warehouse ID for queries"
+
+workspace:
+  host: https://fevm-clinical-data-demo.cloud.databricks.com
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: mission_control_dev
+
+  staging:
+    variables:
+      catalog: mission_control_staging
+
+  prod:
+    mode: production
+    variables:
+      catalog: mission_control

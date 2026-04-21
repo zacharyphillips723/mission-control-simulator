@@ -1,0 +1,50 @@
+resources:
+  model_serving_endpoints:
+    trajectory_prediction:
+      name: "mission-control-trajectory-${bundle.target}"
+      config:
+        served_entities:
+          - entity_name: "${var.catalog}.models.trajectory_prediction"
+            entity_version: "1"
+            workload_size: Small
+            scale_to_zero_enabled: true
+        auto_capture_config:
+          catalog_name: ${var.catalog}
+          schema_name: models
+          enabled: true
+
+    fuel_estimation:
+      name: "mission-control-fuel-${bundle.target}"
+      config:
+        served_entities:
+          - entity_name: "${var.catalog}.models.fuel_estimation"
+            entity_version: "1"
+            workload_size: Small
+            scale_to_zero_enabled: true
+
+    hazard_risk:
+      name: "mission-control-hazard-risk-${bundle.target}"
+      config:
+        served_entities:
+          - entity_name: "${var.catalog}.models.hazard_risk"
+            entity_version: "1"
+            workload_size: Small
+            scale_to_zero_enabled: true
+
+    maneuver_ranking:
+      name: "mission-control-maneuver-rank-${bundle.target}"
+      config:
+        served_entities:
+          - entity_name: "${var.catalog}.models.maneuver_ranking"
+            entity_version: "1"
+            workload_size: Small
+            scale_to_zero_enabled: true
+
+    delay_aware_policy:
+      name: "mission-control-delay-policy-${bundle.target}"
+      config:
+        served_entities:
+          - entity_name: "${var.catalog}.models.delay_aware_policy"
+            entity_version: "1"
+            workload_size: Small
+            scale_to_zero_enabled: true

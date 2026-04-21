@@ -1,0 +1,22 @@
+resources:
+  apps:
+    mission_control_dashboard:
+      name: "mission-control-${bundle.target}"
+      description: "NASA-style mission control dashboard for spacecraft navigation simulation"
+      source_code_path: ../app
+      config:
+        - name: CATALOG
+          value: ${var.catalog}
+        - name: DATABRICKS_HOST
+          value: ${workspace.host}
+
+      resources:
+        - name: mission-control-sql
+          description: "SQL warehouse for querying mission data"
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+
+      permissions:
+        - user_name: ${workspace.current_user.userName}
+          level: CAN_MANAGE
