@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
+import lakebase_client
 from inference_logger import InferenceLogger
 
 
@@ -663,42 +664,33 @@ class AgentOrchestrator:
 
     def _write_agent_memory(self, spark, agent_name: str, output: dict, tick_id: str):
         """Write agent output to Lakebase for downstream agents to read."""
-        safe_value = json.dumps(output, default=str).replace("'", "''")
+        safe_value = json.dumps(output, default=str)
         try:
-            spark.sql(f"""
-                MERGE INTO `{self.catalog}`.ops.agent_memory AS target
-                USING (SELECT '{agent_name}' AS agent_name, 'latest_analysis' AS memory_key) AS source
-                ON target.agent_name = source.agent_name AND target.memory_key = source.memory_key
-                WHEN MATCHED THEN UPDATE SET
-                    memory_value = '{safe_value}',
-                    updated_at = CURRENT_TIMESTAMP()
-                WHEN NOT MATCHED THEN INSERT (agent_name, memory_key, memory_value, created_at, updated_at)
-                VALUES ('{agent_name}', 'latest_analysis', '{safe_value}', CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())
-            """)
+            lakebase_client.upsert(
+                "agent_memory",
+                {"agent_name": agent_name, "memory_key": "latest_analysis"},
+                {"memory_value": safe_value, "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)}
+            )
         except Exception as e:
-            # Fallback: try INSERT with DELETE first
-            try:
-                spark.sql(f"DELETE FROM `{self.catalog}`.ops.agent_memory WHERE agent_name = '{agent_name}' AND memory_key = 'latest_analysis'")
-                spark.sql(f"""
-                    INSERT INTO `{self.catalog}`.ops.agent_memory VALUES (
-                        '{agent_name}', 'latest_analysis', '{safe_value}',
-                        CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), NULL
-                    )
-                """)
-            except Exception:
-                print(f"    ⚠ Could not write agent_memory for {agent_name}: {e}")
+            print(f"    ⚠ Could not write agent_memory for {agent_name}: {e}")
 
     def _write_realtime_message(self, spark, msg: AgentMessage):
         """Write a message to Lakebase for real-time display."""
-        safe_content = json.dumps(msg.content, default=str).replace("'", "''")
+        safe_content = json.dumps(msg.content, default=str)
         try:
-            spark.sql(f"""
-                INSERT INTO `{self.catalog}`.ops.agent_messages_realtime VALUES (
-                    '{msg.message_id}', '{msg.from_agent}', '{msg.to_agent}',
-                    '{msg.message_type}', '{safe_content}', '{msg.tick_id}',
-                    CURRENT_TIMESTAMP()
-                )
-            """)
+            lakebase_client.execute(
+                "INSERT INTO agent_messages_realtime (message_id, from_agent, to_agent, message_type, content, tick_id, created_at) "
+                "VALUES (%(message_id)s, %(from_agent)s, %(to_agent)s, %(message_type)s, %(content)s, %(tick_id)s, %(created_at)s)",
+                {
+                    "message_id": msg.message_id,
+                    "from_agent": msg.from_agent,
+                    "to_agent": msg.to_agent,
+                    "message_type": msg.message_type,
+                    "content": safe_content,
+                    "tick_id": msg.tick_id,
+                    "created_at": datetime.now(timezone.utc),
+                }
+            )
         except Exception as e:
             print(f"    ⚠ Could not write realtime message: {e}")
 

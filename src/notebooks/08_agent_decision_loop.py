@@ -18,7 +18,9 @@
 # COMMAND ----------
 
 dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
+dbutils.widgets.text("lakebase_project_id", "mission-control", "Lakebase Project ID")
 catalog = dbutils.widgets.get("catalog")
+lakebase_project_id = dbutils.widgets.get("lakebase_project_id")
 
 # COMMAND ----------
 
@@ -28,6 +30,11 @@ from datetime import datetime, timezone
 notebook_path = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
 repo_root = "/".join(notebook_path.split("/")[:-2])
 sys.path.insert(0, os.path.join("/Workspace", repo_root, "src", "python"))
+
+# COMMAND ----------
+
+import lakebase_client
+lakebase_client.init(lakebase_project_id)
 
 # COMMAND ----------
 
@@ -42,8 +49,9 @@ from agent_framework import (
 )
 from inference_logger import InferenceLogger
 
-# Set CATALOG env var for agent_tools.py
+# Set CATALOG and LAKEBASE_PROJECT_ID env vars for agent_tools.py
 os.environ["CATALOG"] = catalog
+os.environ["LAKEBASE_PROJECT_ID"] = lakebase_project_id
 
 # Build tool registry (maps tool names → Python functions with schemas)
 tool_registry = build_tool_registry()
@@ -223,52 +231,52 @@ print(f"Agent configs loaded: {list(agent_configs.keys())}")
 
 from physics_engine import BODIES, Vector3, communication_delay
 
-# Read current state
-state_row = spark.sql(f"SELECT * FROM `{catalog}`.ops.mission_state WHERE state_id = 1").collect()
+# Read current state (Lakebase)
+state_row = lakebase_client.fetch_one("SELECT * FROM mission_state WHERE state_id = 1")
 if not state_row:
     dbutils.notebook.exit("No mission state found — run setup first")
-state_row = state_row[0]
 
-# Read active hazards
-hazard_count = spark.sql(f"SELECT COUNT(*) as cnt FROM `{catalog}`.ops.active_hazards").collect()[0]["cnt"]
+# Read active hazards (Lakebase)
+hazard_result = lakebase_client.fetch_one("SELECT COUNT(*) AS cnt FROM active_hazards")
+hazard_count = hazard_result["cnt"]
 
-# Read candidate maneuvers
+# Read candidate maneuvers (Delta — navigation schema, stays with Spark)
 maneuver_count = spark.sql(f"""
     SELECT COUNT(*) as cnt FROM `{catalog}`.navigation.candidate_maneuvers WHERE status = 'proposed'
 """).collect()[0]["cnt"]
 
 # Communication delay
-earth_pos = BODIES["earth"].position_at(state_row.mission_elapsed_s)
-sc_pos = Vector3(state_row.position_x, state_row.position_y, state_row.position_z)
+earth_pos = BODIES["earth"].position_at(state_row["mission_elapsed_s"])
+sc_pos = Vector3(state_row["position_x"], state_row["position_y"], state_row["position_z"])
 comm_delay = communication_delay(sc_pos, earth_pos)
 
 # Build context dict that all agents receive
 mission_context = {
-    "position_x": state_row.position_x,
-    "position_y": state_row.position_y,
-    "position_z": state_row.position_z,
-    "velocity_x": state_row.velocity_x,
-    "velocity_y": state_row.velocity_y,
-    "velocity_z": state_row.velocity_z,
-    "speed_km_s": Vector3(state_row.velocity_x, state_row.velocity_y, state_row.velocity_z).magnitude(),
-    "fuel_remaining_kg": state_row.fuel_remaining_kg,
-    "hull_integrity": state_row.hull_integrity,
-    "engine_status": state_row.engine_status,
+    "position_x": state_row["position_x"],
+    "position_y": state_row["position_y"],
+    "position_z": state_row["position_z"],
+    "velocity_x": state_row["velocity_x"],
+    "velocity_y": state_row["velocity_y"],
+    "velocity_z": state_row["velocity_z"],
+    "speed_km_s": Vector3(state_row["velocity_x"], state_row["velocity_y"], state_row["velocity_z"]).magnitude(),
+    "fuel_remaining_kg": state_row["fuel_remaining_kg"],
+    "hull_integrity": state_row["hull_integrity"],
+    "engine_status": state_row["engine_status"],
     "communication_delay_s": comm_delay,
     "communication_delay_min": comm_delay / 60,
-    "mission_elapsed_s": state_row.mission_elapsed_s,
-    "mission_elapsed_days": state_row.mission_elapsed_s / 86400,
+    "mission_elapsed_s": state_row["mission_elapsed_s"],
+    "mission_elapsed_days": state_row["mission_elapsed_s"] / 86400,
     "active_hazard_count": hazard_count,
     "candidate_maneuver_count": maneuver_count,
     "distance_to_earth_km": (sc_pos - earth_pos).magnitude(),
-    "mission_status": state_row.mission_status,
+    "mission_status": state_row["mission_status"],
 }
 
 print(f"Mission context built:")
-print(f"  Position: ({state_row.position_x:.0f}, {state_row.position_y:.0f}, {state_row.position_z:.0f}) km")
+print(f"  Position: ({state_row['position_x']:.0f}, {state_row['position_y']:.0f}, {state_row['position_z']:.0f}) km")
 print(f"  Speed: {mission_context['speed_km_s']:.2f} km/s")
-print(f"  Fuel: {state_row.fuel_remaining_kg:.1f} kg")
-print(f"  Hull: {state_row.hull_integrity:.1f}%")
+print(f"  Fuel: {state_row['fuel_remaining_kg']:.1f} kg")
+print(f"  Hull: {state_row['hull_integrity']:.1f}%")
 print(f"  Comm delay: {comm_delay:.1f}s ({comm_delay/60:.1f} min)")
 print(f"  Active hazards: {hazard_count}")
 print(f"  Candidate maneuvers: {maneuver_count}")
@@ -334,7 +342,23 @@ if tick_result.commander_decision in ("GO", "EMERGENCY_EVASION") and tick_result
     )
 
     # Queue the command in Lakebase
-    spark.sql(executor.queue_command_sql(cmd))
+    payload_json = json.dumps(cmd.payload)
+    lakebase_client.execute(
+        """INSERT INTO command_queue
+           (command_id, command_type, payload, priority, created_at,
+            approved_by, approved_at, transmit_time, estimated_receive_time,
+            status, updated_at)
+           VALUES (%(command_id)s, %(command_type)s, %(payload)s, %(priority)s, NOW(),
+                   %(approved_by)s, NOW(), NULL, NULL, %(status)s, NOW())""",
+        {
+            "command_id": cmd.command_id,
+            "command_type": cmd.command_type,
+            "payload": payload_json,
+            "priority": cmd.priority,
+            "approved_by": cmd.approved_by or "",
+            "status": cmd.status,
+        },
+    )
     print(f"\n✓ Command queued: {cmd.command_id}")
     print(f"  Type: {cmd.command_type}")
     print(f"  Priority: {cmd.priority}")
@@ -358,21 +382,25 @@ total_ops = (
     sum(len(d.tool_calls) for d in tick_result.decisions)
 )
 
-spark.sql(f"""
-    INSERT INTO `{catalog}`.ops.throughput_metrics VALUES (
-        '{str(uuid.uuid4())}',
-        'agent_loop',
-        CURRENT_TIMESTAMP(),
-        {time.time() - tick_start},
-        {inference_logger.call_count},
-        {len(tick_result.decisions) + len(tick_result.messages)},
-        {total_ops},
-        {total_ops / max(time.time() - tick_start, 0.001)},
-        0,
-        0,
-        0
-    )
-""")
+tick_elapsed = time.time() - tick_start
+lakebase_client.execute(
+    """INSERT INTO throughput_metrics
+       (metric_id, component, recorded_at, elapsed_s, model_calls,
+        db_operations, total_operations, ops_per_second,
+        error_count, retry_count, cache_hits)
+       VALUES (%(metric_id)s, %(component)s, NOW(), %(elapsed_s)s, %(model_calls)s,
+               %(db_operations)s, %(total_operations)s, %(ops_per_second)s,
+               0, 0, 0)""",
+    {
+        "metric_id": str(uuid.uuid4()),
+        "component": "agent_loop",
+        "elapsed_s": tick_elapsed,
+        "model_calls": inference_logger.call_count,
+        "db_operations": len(tick_result.decisions) + len(tick_result.messages),
+        "total_operations": total_ops,
+        "ops_per_second": total_ops / max(tick_elapsed, 0.001),
+    },
+)
 
 print(f"\nThroughput: {total_ops} total operations")
 print(f"  Model inference calls: {inference_logger.call_count}")

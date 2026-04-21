@@ -16,9 +16,11 @@
 
 dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
 dbutils.widgets.text("tick_duration_s", "300", "Simulation seconds per tick")
+dbutils.widgets.text("lakebase_project_id", "mission-control", "Lakebase Project ID")
 
 catalog = dbutils.widgets.get("catalog")
 tick_duration_s = int(dbutils.widgets.get("tick_duration_s"))
+lakebase_project_id = dbutils.widgets.get("lakebase_project_id")
 
 # COMMAND ----------
 
@@ -36,6 +38,10 @@ from spacecraft_autopilot import (
     SpacecraftAutopilot, AutopilotState, AutopilotDecision,
     GroundCommand,
 )
+import lakebase_client
+
+lakebase_client.init(lakebase_project_id)
+
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, TimestampType, IntegerType,
@@ -49,25 +55,27 @@ from datetime import datetime, timezone, timedelta
 
 # COMMAND ----------
 
-state_row = spark.sql(f"""
-    SELECT * FROM `{catalog}`.ops.mission_state WHERE state_id = 1
-""").collect()[0]
-
-clock_row = spark.sql(f"""
-    SELECT * FROM `{catalog}`.ops.simulation_clock WHERE clock_id = 1
-""").collect()[0]
-
-current_state = SpacecraftState(
-    position=Vector3(state_row.position_x, state_row.position_y, state_row.position_z),
-    velocity=Vector3(state_row.velocity_x, state_row.velocity_y, state_row.velocity_z),
-    fuel_remaining_kg=state_row.fuel_remaining_kg,
-    hull_integrity=state_row.hull_integrity,
-    engine_status=state_row.engine_status,
-    timestamp_s=state_row.mission_elapsed_s,
+state_row = lakebase_client.fetch_one(
+    "SELECT * FROM mission_state WHERE state_id = %(state_id)s",
+    {"state_id": 1},
 )
 
-sim_time = clock_row.simulation_time
-time_scale = clock_row.time_scale
+clock_row = lakebase_client.fetch_one(
+    "SELECT * FROM simulation_clock WHERE clock_id = %(clock_id)s",
+    {"clock_id": 1},
+)
+
+current_state = SpacecraftState(
+    position=Vector3(state_row["position_x"], state_row["position_y"], state_row["position_z"]),
+    velocity=Vector3(state_row["velocity_x"], state_row["velocity_y"], state_row["velocity_z"]),
+    fuel_remaining_kg=state_row["fuel_remaining_kg"],
+    hull_integrity=state_row["hull_integrity"],
+    engine_status=state_row["engine_status"],
+    timestamp_s=state_row["mission_elapsed_s"],
+)
+
+sim_time = clock_row["simulation_time"]
+time_scale = clock_row["time_scale"]
 
 print(f"[SHIP] Current position: ({current_state.position.x:.0f}, {current_state.position.y:.0f}, {current_state.position.z:.0f})")
 print(f"[SHIP] Speed: {current_state.speed:.2f} km/s | Fuel: {current_state.fuel_remaining_kg:.1f} kg | Hull: {current_state.hull_integrity:.1f}%")
@@ -81,32 +89,28 @@ print(f"[SHIP] Simulation time: {sim_time} | Time scale: {time_scale}x")
 # COMMAND ----------
 
 # Commands whose estimated_receive_time has passed are now "received" by the ship
-received_commands_rows = spark.sql(f"""
-    UPDATE `{catalog}`.ops.command_queue
-    SET status = 'received'
-    WHERE status = 'in_flight'
-      AND estimated_receive_time <= TIMESTAMP '{sim_time.strftime("%Y-%m-%d %H:%M:%S")}'
-""")
+lakebase_client.execute(
+    "UPDATE command_queue SET status = 'received' WHERE status = 'in_flight' AND estimated_receive_time <= %(sim_time)s",
+    {"sim_time": sim_time},
+)
 
 # Fetch all commands that are now in 'received' status and ready for autopilot
-pending_cmd_rows = spark.sql(f"""
-    SELECT * FROM `{catalog}`.ops.command_queue
-    WHERE status = 'received'
-    ORDER BY priority DESC, estimated_receive_time ASC
-""").collect()
+pending_cmd_rows = lakebase_client.fetch_all(
+    "SELECT * FROM command_queue WHERE status = 'received' ORDER BY priority DESC, estimated_receive_time ASC"
+)
 
 pending_commands = []
 for row in pending_cmd_rows:
     pending_commands.append(GroundCommand(
-        command_id=row.command_id,
-        command_type=row.command_type,
-        burn_vector_x=float(row.burn_vector_x) if hasattr(row, 'burn_vector_x') and row.burn_vector_x else 0.0,
-        burn_vector_y=float(row.burn_vector_y) if hasattr(row, 'burn_vector_y') and row.burn_vector_y else 0.0,
-        burn_vector_z=float(row.burn_vector_z) if hasattr(row, 'burn_vector_z') and row.burn_vector_z else 0.0,
-        burn_duration_s=float(row.burn_duration_s) if hasattr(row, 'burn_duration_s') and row.burn_duration_s else 0.0,
-        delta_v=float(row.delta_v) if hasattr(row, 'delta_v') and row.delta_v else 0.0,
-        fuel_cost_kg=float(row.fuel_cost_kg) if hasattr(row, 'fuel_cost_kg') and row.fuel_cost_kg else 0.0,
-        priority=row.priority if hasattr(row, 'priority') and row.priority else "normal",
+        command_id=row["command_id"],
+        command_type=row["command_type"],
+        burn_vector_x=float(row["burn_vector_x"]) if row.get("burn_vector_x") else 0.0,
+        burn_vector_y=float(row["burn_vector_y"]) if row.get("burn_vector_y") else 0.0,
+        burn_vector_z=float(row["burn_vector_z"]) if row.get("burn_vector_z") else 0.0,
+        burn_duration_s=float(row["burn_duration_s"]) if row.get("burn_duration_s") else 0.0,
+        delta_v=float(row["delta_v"]) if row.get("delta_v") else 0.0,
+        fuel_cost_kg=float(row["fuel_cost_kg"]) if row.get("fuel_cost_kg") else 0.0,
+        priority=row["priority"] if row.get("priority") else "normal",
         status="received",
     ))
 
@@ -121,18 +125,16 @@ print(f"[SHIP] Pending commands: {len(pending_commands)}")
 
 from physics_engine import Hazard
 
-hazard_rows = spark.sql(f"""
-    SELECT * FROM `{catalog}`.ops.active_hazards
-""").collect()
+hazard_rows = lakebase_client.fetch_all("SELECT * FROM active_hazards")
 
 active_hazards = []
 for h in hazard_rows:
     active_hazards.append(Hazard(
-        hazard_id=h.hazard_id,
-        hazard_type=h.hazard_type,
-        position=Vector3(h.position_x, h.position_y, h.position_z),
-        velocity=Vector3(h.velocity_x, h.velocity_y, h.velocity_z),
-        radius_km=h.radius_km,
+        hazard_id=h["hazard_id"],
+        hazard_type=h["hazard_type"],
+        position=Vector3(h["position_x"], h["position_y"], h["position_z"]),
+        velocity=Vector3(h["velocity_x"], h["velocity_y"], h["velocity_z"]),
+        radius_km=h["radius_km"],
     ))
 
 print(f"[SHIP] Active hazards in range: {len(active_hazards)}")
@@ -145,20 +147,20 @@ print(f"[SHIP] Active hazards in range: {len(active_hazards)}")
 # COMMAND ----------
 
 try:
-    ap_row = spark.sql(f"""
-        SELECT * FROM `{catalog}`.ops.spacecraft_autopilot_state WHERE autopilot_id = 1
-    """).collect()
+    ap_row = lakebase_client.fetch_one(
+        "SELECT * FROM spacecraft_autopilot_state WHERE autopilot_id = %(autopilot_id)s",
+        {"autopilot_id": 1},
+    )
     if ap_row:
-        ap_row = ap_row[0]
         autopilot_state = AutopilotState(
-            mode=ap_row.mode,
-            total_corrections=int(ap_row.total_corrections),
-            total_evasions=int(ap_row.total_evasions),
-            total_commands_executed=int(ap_row.total_commands_executed),
-            total_commands_rejected=int(ap_row.total_commands_rejected),
-            fuel_used_by_autopilot_kg=float(ap_row.fuel_used_by_autopilot_kg),
-            last_decision_time_s=float(ap_row.last_decision_time_s),
-            ticks_processed=int(ap_row.ticks_processed),
+            mode=ap_row["mode"],
+            total_corrections=int(ap_row["total_corrections"]),
+            total_evasions=int(ap_row["total_evasions"]),
+            total_commands_executed=int(ap_row["total_commands_executed"]),
+            total_commands_rejected=int(ap_row["total_commands_rejected"]),
+            fuel_used_by_autopilot_kg=float(ap_row["fuel_used_by_autopilot_kg"]),
+            last_decision_time_s=float(ap_row["last_decision_time_s"]),
+            ticks_processed=int(ap_row["ticks_processed"]),
         )
     else:
         autopilot_state = AutopilotState()
@@ -261,29 +263,30 @@ for second in range(effective_duration):
         batch_start = max(0, len(telemetry_rows) - 10)
         batch = telemetry_rows[batch_start:]
         for row in batch:
-            spark.sql(f"""
-                INSERT INTO `{catalog}`.ops.telemetry_realtime VALUES (
-                    '{row["telemetry_id"]}',
-                    TIMESTAMP '{row["timestamp"]}',
-                    {row["position_x"]}, {row["position_y"]}, {row["position_z"]},
-                    {row["velocity_x"]}, {row["velocity_y"]}, {row["velocity_z"]},
-                    {row["fuel_remaining_kg"]}, {row["hull_integrity"]},
-                    '{row["engine_status"]}',
-                    {row["communication_delay_s"]},
-                    TIMESTAMP '{row["ingestion_timestamp"]}'
-                )
-            """)
+            lakebase_client.execute(
+                """INSERT INTO telemetry_realtime (
+                    telemetry_id, timestamp, position_x, position_y, position_z,
+                    velocity_x, velocity_y, velocity_z,
+                    fuel_remaining_kg, hull_integrity, engine_status,
+                    communication_delay_s, ingestion_timestamp
+                ) VALUES (
+                    %(telemetry_id)s, %(timestamp)s,
+                    %(position_x)s, %(position_y)s, %(position_z)s,
+                    %(velocity_x)s, %(velocity_y)s, %(velocity_z)s,
+                    %(fuel_remaining_kg)s, %(hull_integrity)s, %(engine_status)s,
+                    %(communication_delay_s)s, %(ingestion_timestamp)s
+                )""",
+                row,
+            )
             write_count += 1
 
         # Trim realtime table to latest 600 rows
-        spark.sql(f"""
-            DELETE FROM `{catalog}`.ops.telemetry_realtime
-            WHERE timestamp < (
-                SELECT MIN(timestamp) FROM (
-                    SELECT timestamp FROM `{catalog}`.ops.telemetry_realtime
-                    ORDER BY timestamp DESC
-                    LIMIT 600
-                )
+        lakebase_client.execute("""
+            DELETE FROM telemetry_realtime
+            WHERE tick_seq NOT IN (
+                SELECT tick_seq FROM telemetry_realtime
+                ORDER BY simulation_time_s DESC
+                LIMIT 600
             )
         """)
         read_count += 1
@@ -326,24 +329,30 @@ earth_pos = BODIES["earth"].position_at(state.timestamp_s)
 final_delay = communication_delay(state.position, earth_pos)
 new_sim_time = sim_time + timedelta(seconds=effective_duration)
 
-spark.sql(f"""
-    UPDATE `{catalog}`.ops.mission_state
-    SET
-        timestamp = TIMESTAMP '{new_sim_time.strftime("%Y-%m-%d %H:%M:%S")}',
-        position_x = {state.position.x},
-        position_y = {state.position.y},
-        position_z = {state.position.z},
-        velocity_x = {state.velocity.x},
-        velocity_y = {state.velocity.y},
-        velocity_z = {state.velocity.z},
-        fuel_remaining_kg = {state.fuel_remaining_kg},
-        hull_integrity = {state.hull_integrity},
-        engine_status = '{state.engine_status}',
-        communication_delay_s = {final_delay},
-        mission_elapsed_s = {state.timestamp_s},
-        updated_at = CURRENT_TIMESTAMP()
-    WHERE state_id = 1
-""")
+lakebase_client.execute(
+    """UPDATE mission_state SET
+        timestamp = %(timestamp)s,
+        position_x = %(position_x)s, position_y = %(position_y)s, position_z = %(position_z)s,
+        velocity_x = %(velocity_x)s, velocity_y = %(velocity_y)s, velocity_z = %(velocity_z)s,
+        fuel_remaining_kg = %(fuel_remaining_kg)s,
+        hull_integrity = %(hull_integrity)s,
+        engine_status = %(engine_status)s,
+        communication_delay_s = %(communication_delay_s)s,
+        mission_elapsed_s = %(mission_elapsed_s)s,
+        updated_at = NOW()
+    WHERE state_id = %(state_id)s""",
+    {
+        "timestamp": new_sim_time,
+        "position_x": state.position.x, "position_y": state.position.y, "position_z": state.position.z,
+        "velocity_x": state.velocity.x, "velocity_y": state.velocity.y, "velocity_z": state.velocity.z,
+        "fuel_remaining_kg": state.fuel_remaining_kg,
+        "hull_integrity": state.hull_integrity,
+        "engine_status": state.engine_status,
+        "communication_delay_s": final_delay,
+        "mission_elapsed_s": state.timestamp_s,
+        "state_id": 1,
+    },
+)
 write_count += 1
 print(f"[SHIP] Mission state updated — sim time: {new_sim_time}")
 
@@ -355,31 +364,21 @@ print(f"[SHIP] Mission state updated — sim time: {new_sim_time}")
 # COMMAND ----------
 
 ap_state = autopilot.state
-spark.sql(f"""
-    MERGE INTO `{catalog}`.ops.spacecraft_autopilot_state AS target
-    USING (SELECT 1 AS autopilot_id) AS source
-    ON target.autopilot_id = source.autopilot_id
-    WHEN MATCHED THEN UPDATE SET
-        mode = '{ap_state.mode}',
-        total_corrections = {ap_state.total_corrections},
-        total_evasions = {ap_state.total_evasions},
-        total_commands_executed = {ap_state.total_commands_executed},
-        total_commands_rejected = {ap_state.total_commands_rejected},
-        fuel_used_by_autopilot_kg = {ap_state.fuel_used_by_autopilot_kg},
-        last_decision_time_s = {ap_state.last_decision_time_s},
-        ticks_processed = {ap_state.ticks_processed},
-        updated_at = CURRENT_TIMESTAMP()
-    WHEN NOT MATCHED THEN INSERT (
-        autopilot_id, mode, total_corrections, total_evasions,
-        total_commands_executed, total_commands_rejected,
-        fuel_used_by_autopilot_kg, last_decision_time_s, ticks_processed, updated_at
-    ) VALUES (
-        1, '{ap_state.mode}', {ap_state.total_corrections}, {ap_state.total_evasions},
-        {ap_state.total_commands_executed}, {ap_state.total_commands_rejected},
-        {ap_state.fuel_used_by_autopilot_kg}, {ap_state.last_decision_time_s},
-        {ap_state.ticks_processed}, CURRENT_TIMESTAMP()
-    )
-""")
+lakebase_client.upsert(
+    "spacecraft_autopilot_state",
+    pk={"autopilot_id": 1},
+    data={
+        "mode": ap_state.mode,
+        "total_corrections": ap_state.total_corrections,
+        "total_evasions": ap_state.total_evasions,
+        "total_commands_executed": ap_state.total_commands_executed,
+        "total_commands_rejected": ap_state.total_commands_rejected,
+        "fuel_used_by_autopilot_kg": ap_state.fuel_used_by_autopilot_kg,
+        "last_decision_time_s": ap_state.last_decision_time_s,
+        "ticks_processed": ap_state.ticks_processed,
+        "updated_at": datetime.now(timezone.utc),
+    },
+)
 write_count += 1
 print(f"[SHIP] Autopilot state saved — mode: {ap_state.mode}, evasions: {ap_state.total_evasions}, corrections: {ap_state.total_corrections}")
 
@@ -390,13 +389,10 @@ print(f"[SHIP] Autopilot state saved — mode: {ap_state.mode}, evasions: {ap_st
 
 # COMMAND ----------
 
-spark.sql(f"""
-    UPDATE `{catalog}`.ops.simulation_clock
-    SET
-        simulation_time = TIMESTAMP '{new_sim_time.strftime("%Y-%m-%d %H:%M:%S")}',
-        total_elapsed_s = {state.timestamp_s}
-    WHERE clock_id = 1
-""")
+lakebase_client.execute(
+    "UPDATE simulation_clock SET simulation_time = %(simulation_time)s, total_elapsed_s = %(total_elapsed_s)s WHERE clock_id = %(clock_id)s",
+    {"simulation_time": new_sim_time, "total_elapsed_s": state.timestamp_s, "clock_id": 1},
+)
 write_count += 1
 print(f"[SHIP] Simulation clock updated to {new_sim_time}")
 
@@ -444,12 +440,10 @@ for cmd in pending_commands:
     if cmd_decisions:
         final_status = "executed" if cmd_decisions[0].action == "execute_command" else "rejected"
         reason = cmd_decisions[0].reasoning
-        spark.sql(f"""
-            UPDATE `{catalog}`.ops.command_queue
-            SET status = '{final_status}',
-                response_reason = '{reason.replace("'", "''")}'
-            WHERE command_id = '{cmd.command_id}'
-        """)
+        lakebase_client.execute(
+            "UPDATE command_queue SET status = %(status)s, response_reason = %(reason)s WHERE command_id = %(command_id)s",
+            {"status": final_status, "reason": reason, "command_id": cmd.command_id},
+        )
         write_count += 1
 
 # COMMAND ----------
@@ -462,21 +456,29 @@ for cmd in pending_commands:
 tick_wall_elapsed = time.time() - tick_wall_start
 ops_per_second = (read_count + write_count) / max(tick_wall_elapsed, 0.001)
 
-spark.sql(f"""
-    INSERT INTO `{catalog}`.ops.throughput_metrics VALUES (
-        '{str(uuid.uuid4())}',
-        'spacecraft_tick',
-        CURRENT_TIMESTAMP(),
-        {tick_wall_elapsed},
-        {read_count},
-        {write_count},
-        {read_count + write_count},
-        {ops_per_second},
-        {effective_duration},
-        {len(telemetry_rows)},
-        {len(notable_decisions)}
-    )
-""")
+lakebase_client.execute(
+    """INSERT INTO throughput_metrics (
+        metric_id, source, timestamp, wall_time_s,
+        read_count, write_count, total_ops, ops_per_second,
+        simulated_seconds, telemetry_rows, decision_rows
+    ) VALUES (
+        %(metric_id)s, %(source)s, NOW(), %(wall_time_s)s,
+        %(read_count)s, %(write_count)s, %(total_ops)s, %(ops_per_second)s,
+        %(simulated_seconds)s, %(telemetry_rows)s, %(decision_rows)s
+    )""",
+    {
+        "metric_id": str(uuid.uuid4()),
+        "source": "spacecraft_tick",
+        "wall_time_s": tick_wall_elapsed,
+        "read_count": read_count,
+        "write_count": write_count,
+        "total_ops": read_count + write_count,
+        "ops_per_second": ops_per_second,
+        "simulated_seconds": effective_duration,
+        "telemetry_rows": len(telemetry_rows),
+        "decision_rows": len(notable_decisions),
+    },
+)
 write_count += 1
 print(f"[SHIP] Throughput: {ops_per_second:.1f} ops/s | Wall time: {tick_wall_elapsed:.2f}s | Reads: {read_count} | Writes: {write_count}")
 

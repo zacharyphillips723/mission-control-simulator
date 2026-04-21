@@ -9,6 +9,10 @@ resources:
           value: ${var.catalog}
         - name: DATABRICKS_HOST
           value: ${workspace.host}
+        - name: LAKEBASE_PROJECT_ID
+          value: ${var.lakebase_project_id}
+        - name: LAKEBASE_BRANCH_ID
+          value: production
 
       resources:
         - name: mission-control-sql

@@ -11,3 +11,7 @@ env:
     description: "Unity Catalog catalog name"
   - name: DATABRICKS_HOST
     description: "Databricks workspace URL"
+  - name: LAKEBASE_PROJECT_ID
+    description: "Lakebase Autoscaling project ID"
+  - name: LAKEBASE_BRANCH_ID
+    description: "Lakebase branch (default: production)"

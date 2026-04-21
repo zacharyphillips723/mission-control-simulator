@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import lakebase_client
 from physics_engine import (
     SpacecraftState,
     Vector3,
@@ -250,20 +251,36 @@ class CommandExecutor:
         self._ops_count += 1
         payload_json = json.dumps(command.payload).replace("'", "''")
         return f"""
-            INSERT INTO `{self.catalog}`.ops.command_queue VALUES (
+            INSERT INTO command_queue VALUES (
                 '{command.command_id}',
                 '{command.command_type}',
                 '{payload_json}',
                 {command.priority},
-                CURRENT_TIMESTAMP(),
+                NOW(),
                 '{command.approved_by or ""}',
-                CURRENT_TIMESTAMP(),
+                NOW(),
                 NULL,
                 NULL,
                 '{command.status}',
-                CURRENT_TIMESTAMP()
+                NOW()
             )
         """
+
+    def queue_command(self, command: Command) -> int:
+        """Insert a command into Lakebase command queue via lakebase_client."""
+        self._ops_count += 1
+        payload_json = json.dumps(command.payload)
+        return lakebase_client.execute(
+            "INSERT INTO command_queue VALUES (%(command_id)s, %(command_type)s, %(payload)s, %(priority)s, NOW(), %(approved_by)s, NOW(), NULL, NULL, %(status)s, NOW())",
+            {
+                "command_id": command.command_id,
+                "command_type": command.command_type,
+                "payload": payload_json,
+                "priority": command.priority,
+                "approved_by": command.approved_by or "",
+                "status": command.status,
+            }
+        )
 
     def transmit_command_sql(
         self,
@@ -273,45 +290,77 @@ class CommandExecutor:
         """Generate SQL to mark a command as transmitted and set estimated receive time."""
         self._ops_count += 1
         return f"""
-            UPDATE `{self.catalog}`.ops.command_queue
+            UPDATE command_queue
             SET
                 status = 'in_flight',
-                transmit_time = CURRENT_TIMESTAMP(),
-                estimated_receive_time = CURRENT_TIMESTAMP() + INTERVAL {int(comm_delay_s)} SECONDS,
-                updated_at = CURRENT_TIMESTAMP()
+                transmit_time = NOW(),
+                estimated_receive_time = NOW() + INTERVAL {int(comm_delay_s)} SECONDS,
+                updated_at = NOW()
             WHERE command_id = '{command_id}'
               AND status = 'approved'
         """
+
+    def transmit_command(self, command_id: str, comm_delay_s: float) -> int:
+        """Mark a command as transmitted via lakebase_client."""
+        self._ops_count += 1
+        return lakebase_client.execute(
+            "UPDATE command_queue SET status = 'in_flight', transmit_time = NOW(), estimated_receive_time = NOW() + INTERVAL %(delay)s SECONDS, updated_at = NOW() WHERE command_id = %(command_id)s AND status = 'approved'",
+            {"command_id": command_id, "delay": int(comm_delay_s)}
+        )
 
     def mark_received_sql(self, command_id: str) -> str:
         """Generate SQL to mark a command as received by spacecraft."""
         self._ops_count += 1
         return f"""
-            UPDATE `{self.catalog}`.ops.command_queue
-            SET status = 'received', updated_at = CURRENT_TIMESTAMP()
+            UPDATE command_queue
+            SET status = 'received', updated_at = NOW()
             WHERE command_id = '{command_id}'
               AND status = 'in_flight'
         """
+
+    def mark_received(self, command_id: str) -> int:
+        """Mark a command as received via lakebase_client."""
+        self._ops_count += 1
+        return lakebase_client.execute(
+            "UPDATE command_queue SET status = 'received', updated_at = NOW() WHERE command_id = %(command_id)s AND status = 'in_flight'",
+            {"command_id": command_id}
+        )
 
     def mark_executed_sql(self, command_id: str, result_msg: str) -> str:
         """Generate SQL to mark a command as executed."""
         self._ops_count += 1
         safe_msg = result_msg.replace("'", "''")
         return f"""
-            UPDATE `{self.catalog}`.ops.command_queue
-            SET status = 'executed', updated_at = CURRENT_TIMESTAMP()
+            UPDATE command_queue
+            SET status = 'executed', updated_at = NOW()
             WHERE command_id = '{command_id}'
         """
+
+    def mark_executed(self, command_id: str, result_msg: str) -> int:
+        """Mark a command as executed via lakebase_client."""
+        self._ops_count += 1
+        return lakebase_client.execute(
+            "UPDATE command_queue SET status = 'executed', updated_at = NOW() WHERE command_id = %(command_id)s",
+            {"command_id": command_id}
+        )
 
     def mark_failed_sql(self, command_id: str, reason: str) -> str:
         """Generate SQL to mark a command as failed/rejected."""
         self._ops_count += 1
         safe_reason = reason.replace("'", "''")
         return f"""
-            UPDATE `{self.catalog}`.ops.command_queue
-            SET status = 'failed', updated_at = CURRENT_TIMESTAMP()
+            UPDATE command_queue
+            SET status = 'failed', updated_at = NOW()
             WHERE command_id = '{command_id}'
         """
+
+    def mark_failed(self, command_id: str, reason: str) -> int:
+        """Mark a command as failed via lakebase_client."""
+        self._ops_count += 1
+        return lakebase_client.execute(
+            "UPDATE command_queue SET status = 'failed', updated_at = NOW() WHERE command_id = %(command_id)s",
+            {"command_id": command_id}
+        )
 
     def log_to_delta_sql(self, command: Command, result: Optional[CommandResult] = None) -> str:
         """Generate SQL to log a command lifecycle event to Delta."""

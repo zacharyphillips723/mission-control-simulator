@@ -1,4 +1,6 @@
 fastapi>=0.104.0
 uvicorn>=0.24.0
-databricks-sdk>=0.20.0
+databricks-sdk>=0.81.0
 databricks-sql-connector>=3.0.0
+psycopg[binary]>=3.0
+sqlalchemy>=2.0

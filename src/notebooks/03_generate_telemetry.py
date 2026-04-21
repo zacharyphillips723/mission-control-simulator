@@ -10,11 +10,13 @@ dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
 dbutils.widgets.text("duration_hours", "24", "Simulation Duration (hours)")
 dbutils.widgets.text("batch_size_s", "3600", "Batch size in seconds")
 dbutils.widgets.dropdown("mode", "single", ["single", "multi_profile"], "Generation Mode")
+dbutils.widgets.text("lakebase_project_id", "", "Lakebase Project ID")
 
 catalog = dbutils.widgets.get("catalog")
 duration_hours = int(dbutils.widgets.get("duration_hours"))
 batch_size_s = int(dbutils.widgets.get("batch_size_s"))
 mode = dbutils.widgets.get("mode")
+lakebase_project_id = dbutils.widgets.get("lakebase_project_id")
 
 # COMMAND ----------
 
@@ -34,9 +36,12 @@ sys.path.insert(0, os.path.join("/Workspace", repo_root, "src", "python"))
 from physics_engine import create_initial_state, BODIES, communication_delay
 from telemetry_generator import generate_telemetry_batch, generate_candidate_maneuvers
 from mission_profiles import PROFILES, generate_profile_telemetry, generate_all_profiles
+import lakebase_client
 from pyspark.sql.types import *
 from pyspark.sql import functions as F
 from datetime import datetime, timezone
+
+lakebase_client.init(lakebase_project_id)
 
 # COMMAND ----------
 
@@ -197,29 +202,48 @@ else:
     _init_state = initial_state
     _delay = delay
 
-spark.sql(f"""
-INSERT INTO `{catalog}`.ops.mission_state VALUES (
-    1,
-    'Odyssey Return',
-    'active',
-    TIMESTAMP '{init_time.strftime("%Y-%m-%d %H:%M:%S")}',
-    {_init_state.position.x},
-    {_init_state.position.y},
-    {_init_state.position.z},
-    {_init_state.velocity.x},
-    {_init_state.velocity.y},
-    {_init_state.velocity.z},
-    {_init_state.fuel_remaining_kg},
-    100.0,
-    'nominal',
-    {_delay},
-    NULL,
-    0.0,
-    CURRENT_TIMESTAMP()
+lakebase_client.execute(
+    """
+    INSERT INTO mission_state VALUES (
+        %(mission_id)s,
+        %(mission_name)s,
+        %(status)s,
+        %(mission_start_time)s,
+        %(pos_x)s,
+        %(pos_y)s,
+        %(pos_z)s,
+        %(vel_x)s,
+        %(vel_y)s,
+        %(vel_z)s,
+        %(fuel_remaining_kg)s,
+        %(hull_integrity_pct)s,
+        %(system_status)s,
+        %(comm_delay_s)s,
+        NULL,
+        %(radiation_exposure)s,
+        NOW()
+    )
+    """,
+    {
+        "mission_id": 1,
+        "mission_name": "Odyssey Return",
+        "status": "active",
+        "mission_start_time": init_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "pos_x": _init_state.position.x,
+        "pos_y": _init_state.position.y,
+        "pos_z": _init_state.position.z,
+        "vel_x": _init_state.velocity.x,
+        "vel_y": _init_state.velocity.y,
+        "vel_z": _init_state.velocity.z,
+        "fuel_remaining_kg": _init_state.fuel_remaining_kg,
+        "hull_integrity_pct": 100.0,
+        "system_status": "nominal",
+        "comm_delay_s": _delay,
+        "radiation_exposure": 0.0,
+    },
 )
-""")
 
-print("✓ Mission state initialized in Lakebase")
+print("Mission state initialized in Lakebase")
 
 # COMMAND ----------
 
@@ -228,19 +252,28 @@ print("✓ Mission state initialized in Lakebase")
 
 # COMMAND ----------
 
-spark.sql(f"""
-INSERT INTO `{catalog}`.ops.simulation_clock VALUES (
-    1,
-    TIMESTAMP '{init_time.strftime("%Y-%m-%d %H:%M:%S")}',
-    1.0,
-    false,
-    NULL,
-    NULL,
-    0.0
+lakebase_client.execute(
+    """
+    INSERT INTO simulation_clock VALUES (
+        %(clock_id)s,
+        %(current_time)s,
+        %(time_scale)s,
+        %(is_paused)s,
+        NULL,
+        NULL,
+        %(elapsed_s)s
+    )
+    """,
+    {
+        "clock_id": 1,
+        "current_time": init_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "time_scale": 1.0,
+        "is_paused": False,
+        "elapsed_s": 0.0,
+    },
 )
-""")
 
-print("✓ Simulation clock initialized")
+print("Simulation clock initialized")
 
 # COMMAND ----------
 

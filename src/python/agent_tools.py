@@ -15,11 +15,23 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
+import lakebase_client
 import mlflow
 import requests
 from databricks.sdk import WorkspaceClient
 
 CATALOG = os.environ.get("CATALOG", "mission_control_dev")
+LAKEBASE_PROJECT_ID = os.environ.get("LAKEBASE_PROJECT_ID", "mission-control")
+
+_lakebase_initialized = False
+
+
+def _ensure_lakebase():
+    """Initialize Lakebase connection if not already connected."""
+    global _lakebase_initialized
+    if not _lakebase_initialized:
+        lakebase_client.init(LAKEBASE_PROJECT_ID)
+        _lakebase_initialized = True
 
 
 # ---------------------------------------------------------------------------
@@ -355,9 +367,9 @@ def tool_get_optimal_timing(
 
 def tool_get_current_state() -> str:
     """Get the current spacecraft state from Lakebase."""
-    rows = _query_sql(f"SELECT * FROM `{CATALOG}`.ops.mission_state WHERE state_id = 1")
-    if rows:
-        row = rows[0]
+    _ensure_lakebase()
+    row = lakebase_client.fetch_one("SELECT * FROM mission_state WHERE state_id = 1")
+    if row:
         # Convert non-serializable types
         return json.dumps({k: str(v) if isinstance(v, datetime) else v for k, v in row.items()})
     return json.dumps({"error": "No mission state found"})
@@ -365,10 +377,8 @@ def tool_get_current_state() -> str:
 
 def tool_get_active_hazards() -> str:
     """Get all currently active hazards from Lakebase."""
-    rows = _query_sql(f"""
-        SELECT * FROM `{CATALOG}`.ops.active_hazards
-        ORDER BY risk_score DESC
-    """)
+    _ensure_lakebase()
+    rows = lakebase_client.fetch_all("SELECT * FROM active_hazards ORDER BY risk_score DESC")
     return json.dumps([
         {k: str(v) if isinstance(v, datetime) else v for k, v in row.items()}
         for row in rows
@@ -391,11 +401,10 @@ def tool_get_candidate_maneuvers(top_n: int = 5) -> str:
 
 def tool_get_command_queue() -> str:
     """Get pending commands from Lakebase."""
-    rows = _query_sql(f"""
-        SELECT * FROM `{CATALOG}`.ops.command_queue
-        WHERE status IN ('pending', 'approved', 'transmitting')
-        ORDER BY priority ASC, created_at ASC
-    """)
+    _ensure_lakebase()
+    rows = lakebase_client.fetch_all(
+        "SELECT * FROM command_queue WHERE status IN ('pending', 'approved', 'transmitting') ORDER BY priority ASC, created_at ASC"
+    )
     return json.dumps([
         {k: str(v) if isinstance(v, datetime) else v for k, v in row.items()}
         for row in rows
