@@ -11,9 +11,6 @@ variables:
     description: "Lakebase Autoscaling project ID for operational tables"
     default: mission-control
 
-workspace:
-  host: https://fevm-clinical-data-demo.cloud.databricks.com
-
 include:
   - resources/*.yml
 
