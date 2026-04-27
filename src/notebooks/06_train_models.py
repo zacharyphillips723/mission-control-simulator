@@ -10,6 +10,11 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -q "mlflow[databricks]" scikit-learn numpy pandas
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
 dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
 catalog = dbutils.widgets.get("catalog")
 spark.sql(f"USE CATALOG `{catalog}`")
@@ -37,27 +42,74 @@ mlflow.set_experiment(experiment_name)
 
 # COMMAND ----------
 
+# Sample data to fit within serverless memory limits
+MAX_TELEMETRY_ROWS = 10000
+MAX_HAZARD_ROWS = 2000
+MAX_MANEUVER_ROWS = 2000
+
+_telem_total = spark.sql(f"SELECT COUNT(*) as cnt FROM `{catalog}`.telemetry.spacecraft_telemetry").collect()[0]["cnt"]
+_sample_frac = min(1.0, MAX_TELEMETRY_ROWS / max(_telem_total, 1))
+
 telemetry_df = spark.sql(f"""
     SELECT *
     FROM `{catalog}`.telemetry.spacecraft_telemetry
     ORDER BY timestamp ASC
-""").toPandas()
+""").sample(fraction=_sample_frac, seed=42).limit(MAX_TELEMETRY_ROWS).toPandas()
 
 hazard_df = spark.sql(f"""
     SELECT *
     FROM `{catalog}`.hazards.detected_hazards
     ORDER BY detected_at ASC
-""").toPandas()
+""").limit(MAX_HAZARD_ROWS).toPandas()
 
 maneuver_df = spark.sql(f"""
     SELECT *
     FROM `{catalog}`.navigation.candidate_maneuvers
     ORDER BY generated_at ASC
-""").toPandas()
+""").limit(MAX_MANEUVER_ROWS).toPandas()
 
 print(f"Telemetry rows: {len(telemetry_df):,}")
 print(f"Hazard rows: {len(hazard_df):,}")
 print(f"Maneuver rows: {len(maneuver_df):,}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Load Real Mission Feedback Data (Onboard Inference Log)
+# MAGIC The `onboard_inference_log` table contains predictions with backfilled actual positions —
+# MAGIC this is the **feedback loop** data that makes each retrain better than the last.
+
+# COMMAND ----------
+
+MAX_INFERENCE_ROWS = 5000
+
+try:
+    inference_total = spark.sql(
+        f"SELECT COUNT(*) as cnt FROM `{catalog}`.models.onboard_inference_log "
+        f"WHERE actual_pos_x IS NOT NULL"
+    ).collect()[0]["cnt"]
+
+    if inference_total > 0:
+        inference_df = spark.sql(f"""
+            SELECT input_pos_x, input_pos_y, input_pos_z,
+                   input_vel_x, input_vel_y, input_vel_z,
+                   input_fuel, input_comm_delay,
+                   actual_pos_x, actual_pos_y, actual_pos_z,
+                   prediction_error_km, prediction_source,
+                   session_id
+            FROM `{catalog}`.models.onboard_inference_log
+            WHERE actual_pos_x IS NOT NULL
+            ORDER BY created_at DESC
+        """).limit(MAX_INFERENCE_ROWS).toPandas()
+        print(f"Inference feedback rows: {len(inference_df):,} (from {inference_total:,} total backfilled)")
+        print(f"  Sources: {inference_df['prediction_source'].value_counts().to_dict()}")
+        print(f"  Avg prediction error: {inference_df['prediction_error_km'].mean():,.0f} km")
+    else:
+        inference_df = None
+        print("No backfilled inference data yet — using synthetic data only")
+except Exception as e:
+    inference_df = None
+    print(f"Could not load inference feedback data: {e}")
 
 # COMMAND ----------
 
@@ -137,6 +189,36 @@ def build_trajectory_features(df: pd.DataFrame, lookahead_rows: int = 60, includ
 
 X_traj, y_traj = build_trajectory_features(telemetry_df, lookahead_rows=60, include_profile=has_multi_profile)
 
+# Blend in real mission feedback data if available
+# This is the feedback loop: real predictions + actual outcomes → better model
+feedback_rows_used = 0
+if inference_df is not None and len(inference_df) > 10:
+    # Build features from inference log (input state → actual future position)
+    feedback_features = inference_df[["input_pos_x", "input_pos_y", "input_pos_z",
+                                       "input_vel_x", "input_vel_y", "input_vel_z",
+                                       "input_fuel", "input_comm_delay"]].copy()
+    feedback_features.columns = ["pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z", "fuel", "comm_delay"]
+
+    if has_multi_profile and "mission_profile_enc" in X_traj.columns:
+        feedback_features["mission_profile_enc"] = 0  # default profile for inference data
+
+    feedback_targets = inference_df[["actual_pos_x", "actual_pos_y", "actual_pos_z"]].copy()
+    feedback_targets.columns = ["future_pos_x", "future_pos_y", "future_pos_z"]
+
+    # Drop rows with NaN
+    valid_mask = feedback_features.notna().all(axis=1) & feedback_targets.notna().all(axis=1)
+    feedback_features = feedback_features[valid_mask]
+    feedback_targets = feedback_targets[valid_mask]
+
+    if len(feedback_features) > 10:
+        X_traj = pd.concat([X_traj, feedback_features], ignore_index=True)
+        y_traj = pd.concat([y_traj, feedback_targets], ignore_index=True)
+        feedback_rows_used = len(feedback_features)
+        print(f"Blended {feedback_rows_used:,} real mission feedback rows into trajectory training data")
+        print(f"Total training data: {len(X_traj):,} rows (synthetic + real feedback)")
+    else:
+        print(f"Insufficient valid feedback rows ({len(feedback_features)}) — using synthetic only")
+
 # Stratify by mission profile when multi-profile data is available
 if has_multi_profile and "mission_profile_enc" in X_traj.columns:
     strat_col = X_traj["mission_profile_enc"]
@@ -150,6 +232,7 @@ with mlflow.start_run(run_name="trajectory_prediction") as run:
     mlflow.log_param("model_type", "GradientBoostingRegressor")
     mlflow.log_param("lookahead_seconds", 60)
     mlflow.log_param("training_rows", len(X_train))
+    mlflow.log_param("feedback_rows", feedback_rows_used)
     mlflow.log_param("n_profiles", n_profiles)
     mlflow.log_param("multi_profile", has_multi_profile)
     if has_multi_profile:
@@ -160,8 +243,8 @@ with mlflow.start_run(run_name="trajectory_prediction") as run:
     model = Pipeline([
         ("scaler", StandardScaler()),
         ("regressor", GradientBoostingRegressor(
-            n_estimators=200,
-            max_depth=6,
+            n_estimators=50,
+            max_depth=4,
             learning_rate=0.1,
             random_state=42,
         ))
@@ -173,7 +256,7 @@ with mlflow.start_run(run_name="trajectory_prediction") as run:
         m = Pipeline([
             ("scaler", StandardScaler()),
             ("regressor", GradientBoostingRegressor(
-                n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42
+                n_estimators=50, max_depth=4, learning_rate=0.1, random_state=42
             ))
         ])
         m.fit(X_train, y_train[col])
@@ -238,7 +321,7 @@ if len(maneuver_df) > 10:
         fuel_model = Pipeline([
             ("scaler", StandardScaler()),
             ("regressor", GradientBoostingRegressor(
-                n_estimators=150, max_depth=5, learning_rate=0.1, random_state=42
+                n_estimators=50, max_depth=4, learning_rate=0.1, random_state=42
             ))
         ])
         fuel_model.fit(X_train_f, y_train_f)
@@ -303,7 +386,7 @@ if len(hazard_df) > 10:
         risk_model = Pipeline([
             ("scaler", StandardScaler()),
             ("regressor", GradientBoostingRegressor(
-                n_estimators=150, max_depth=5, learning_rate=0.1, random_state=42
+                n_estimators=50, max_depth=4, learning_rate=0.1, random_state=42
             ))
         ])
         risk_model.fit(X_train_r, y_train_r)
@@ -358,7 +441,7 @@ if len(maneuver_df) > 10:
         rank_model = Pipeline([
             ("scaler", StandardScaler()),
             ("regressor", RandomForestRegressor(
-                n_estimators=100, max_depth=8, random_state=42
+                n_estimators=50, max_depth=4, random_state=42
             ))
         ])
         rank_model.fit(X_train_m, y_train_m)
@@ -436,7 +519,7 @@ with mlflow.start_run(run_name="delay_aware_policy") as run:
     delay_model = Pipeline([
         ("scaler", StandardScaler()),
         ("regressor", GradientBoostingRegressor(
-            n_estimators=200, max_depth=6, learning_rate=0.1, random_state=42
+            n_estimators=50, max_depth=4, learning_rate=0.1, random_state=42
         ))
     ])
     delay_model.fit(X_train_d, y_train_d)

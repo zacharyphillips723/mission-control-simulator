@@ -15,6 +15,11 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -q "psycopg[binary]>=3.0" "databricks-sdk>=0.81.0"
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
 dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
 dbutils.widgets.text("lakebase_project_id", "mission-control", "Lakebase Project ID")
 catalog = dbutils.widgets.get("catalog")
@@ -25,9 +30,13 @@ lakebase_project_id = dbutils.widgets.get("lakebase_project_id")
 import sys, os, json, uuid, time
 from datetime import datetime, timezone, timedelta
 
-notebook_path = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
-repo_root = "/".join(notebook_path.split("/")[:-2])
-sys.path.insert(0, os.path.join("/Workspace", repo_root, "src", "python"))
+notebook_dir = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
+repo_root = "/".join(notebook_dir.split("/")[:-2])
+python_src = os.path.join("/Workspace", repo_root, "src", "python")
+if not os.path.exists(python_src):
+    for c in [os.path.join(os.getcwd(), d, "src", "python") for d in [".", "..", "../.."]]:
+        if os.path.exists(c): python_src = os.path.abspath(c); break
+sys.path.insert(0, python_src)
 
 from physics_engine import (
     SpacecraftState, Vector3, BODIES,
@@ -197,21 +206,24 @@ ops_per_sec = total_ops / max(tick_elapsed, 0.001)
 
 try:
     lakebase_client.execute(
-        """INSERT INTO throughput_metrics
-           (metric_id, component, recorded_at, elapsed_s, model_calls,
-            db_operations, total_operations, ops_per_second,
-            error_count, retry_count, cache_hits)
-           VALUES (%(metric_id)s, %(component)s, NOW(), %(elapsed_s)s, %(model_calls)s,
-                   %(db_operations)s, %(total_operations)s, %(ops_per_second)s,
-                   0, 0, 0)""",
+        """INSERT INTO throughput_metrics (
+            metric_id, component, timestamp, wall_time_s,
+            read_ops, write_ops, total_ops, ops_per_second,
+            sim_seconds_processed, rows_generated, hazards_detected
+        ) VALUES (
+            %(metric_id)s, %(component)s, NOW(), %(wall_time_s)s,
+            %(read_ops)s, %(write_ops)s, %(total_ops)s, %(ops_per_second)s,
+            0, %(rows_generated)s, 0
+        )""",
         {
             "metric_id": str(uuid.uuid4()),
             "component": "command_transmission",
-            "elapsed_s": tick_elapsed,
-            "model_calls": read_ops,
-            "db_operations": write_ops,
-            "total_operations": total_ops,
+            "wall_time_s": tick_elapsed,
+            "read_ops": read_ops,
+            "write_ops": write_ops,
+            "total_ops": total_ops,
             "ops_per_second": ops_per_sec,
+            "rows_generated": write_ops,
         },
     )
 except Exception:

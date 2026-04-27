@@ -11,11 +11,7 @@ resources:
             notebook_path: ../src/notebooks/00_setup_catalog.py
             base_parameters:
               catalog: ${var.catalog}
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+          environment_key: default
 
         - task_key: setup_delta_tables
           depends_on:
@@ -24,11 +20,7 @@ resources:
             notebook_path: ../src/notebooks/01_setup_delta_tables.py
             base_parameters:
               catalog: ${var.catalog}
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+          environment_key: default
 
         - task_key: setup_lakebase
           depends_on:
@@ -37,11 +29,8 @@ resources:
             notebook_path: ../src/notebooks/02_setup_lakebase.py
             base_parameters:
               catalog: ${var.catalog}
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+              lakebase_project_id: ${var.lakebase_project_id}
+          environment_key: default
 
         - task_key: seed_celestial_bodies
           depends_on:
@@ -50,11 +39,7 @@ resources:
             notebook_path: ../src/notebooks/05_seed_celestial_bodies.py
             base_parameters:
               catalog: ${var.catalog}
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+          environment_key: default
 
         - task_key: generate_telemetry
           depends_on:
@@ -65,13 +50,10 @@ resources:
             notebook_path: ../src/notebooks/03_generate_telemetry.py
             base_parameters:
               catalog: ${var.catalog}
+              lakebase_project_id: ${var.lakebase_project_id}
               duration_hours: "24"
               batch_size_s: "3600"
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+          environment_key: default
 
         - task_key: train_models
           depends_on:
@@ -80,11 +62,7 @@ resources:
             notebook_path: ../src/notebooks/06_train_models.py
             base_parameters:
               catalog: ${var.catalog}
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+          environment_key: default
 
         - task_key: deploy_agents
           depends_on:
@@ -93,32 +71,50 @@ resources:
             notebook_path: ../src/notebooks/07_deploy_agents.py
             base_parameters:
               catalog: ${var.catalog}
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
+
+    mission_control_retrain:
+      name: "[${bundle.target}] Mission Control — Retrain Trajectory Model"
+      description: "On-demand retraining of the trajectory prediction model from inference logs"
+      tags:
+        project: mission-control-simulator
+      tasks:
+        - task_key: retrain_model
+          notebook_task:
+            notebook_path: ../src/notebooks/06_train_models.py
+            base_parameters:
+              catalog: ${var.catalog}
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
 
     mission_control_simulation_loop:
       name: "[${bundle.target}] Mission Control — Simulation Loop"
       description: "Closed-loop simulation: spacecraft tick → ground tick → agent decisions → command transmission"
       tags:
         project: mission-control-simulator
-      schedule:
-        quartz_cron_expression: "0 */5 * * * ?"
-        timezone_id: UTC
+      # Schedule disabled — the app's mini_tick_loop (every 2s) is the primary
+      # simulation driver.  This job is triggered on-demand by /api/simulation/start.
+      # schedule:
+      #   quartz_cron_expression: "0 */5 * * * ?"
+      #   timezone_id: UTC
       tasks:
         - task_key: spacecraft_tick
           notebook_task:
             notebook_path: ../src/notebooks/04b_spacecraft_tick.py
             base_parameters:
               catalog: ${var.catalog}
+              lakebase_project_id: ${var.lakebase_project_id}
               tick_duration_s: "300"
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+          environment_key: default
 
         - task_key: ground_tick
           depends_on:
@@ -127,11 +123,8 @@ resources:
             notebook_path: ../src/notebooks/04_simulation_tick.py
             base_parameters:
               catalog: ${var.catalog}
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+              lakebase_project_id: ${var.lakebase_project_id}
+          environment_key: default
 
         - task_key: agent_decision_loop
           depends_on:
@@ -140,11 +133,8 @@ resources:
             notebook_path: ../src/notebooks/08_agent_decision_loop.py
             base_parameters:
               catalog: ${var.catalog}
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+              lakebase_project_id: ${var.lakebase_project_id}
+          environment_key: default
 
         - task_key: command_transmission
           depends_on:
@@ -153,8 +143,10 @@ resources:
             notebook_path: ../src/notebooks/09_transmit_commands.py
             base_parameters:
               catalog: ${var.catalog}
-          new_cluster:
-            spark_version: 16.2.x-scala2.12
-            num_workers: 0
-            node_type_id: i3.xlarge
-            data_security_mode: SINGLE_USER
+              lakebase_project_id: ${var.lakebase_project_id}
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"

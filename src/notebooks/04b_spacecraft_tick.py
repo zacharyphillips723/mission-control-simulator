@@ -14,6 +14,11 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -q "psycopg[binary]>=3.0" "databricks-sdk>=0.81.0"
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
 dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
 dbutils.widgets.text("tick_duration_s", "300", "Simulation seconds per tick")
 dbutils.widgets.text("lakebase_project_id", "mission-control", "Lakebase Project ID")
@@ -25,9 +30,13 @@ lakebase_project_id = dbutils.widgets.get("lakebase_project_id")
 # COMMAND ----------
 
 import sys, os, time, uuid, json, math
-notebook_path = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
-repo_root = "/".join(notebook_path.split("/")[:-2])
-sys.path.insert(0, os.path.join("/Workspace", repo_root, "src", "python"))
+notebook_dir = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
+repo_root = "/".join(notebook_dir.split("/")[:-2])
+python_src = os.path.join("/Workspace", repo_root, "src", "python")
+if not os.path.exists(python_src):
+    for c in [os.path.join(os.getcwd(), d, "src", "python") for d in [".", "..", "../.."]]:
+        if os.path.exists(c): python_src = os.path.abspath(c); break
+sys.path.insert(0, python_src)
 
 from physics_engine import (
     SpacecraftState, Vector3, BODIES,
@@ -262,21 +271,46 @@ for second in range(effective_duration):
     if (second + 1) % 10 == 0 or second == effective_duration - 1:
         batch_start = max(0, len(telemetry_rows) - 10)
         batch = telemetry_rows[batch_start:]
-        for row in batch:
+        for idx, row in enumerate(batch):
+            seq = int(state.timestamp_s) + batch_start + idx
+            speed = (float(row["velocity_x"])**2 + float(row["velocity_y"])**2 + float(row["velocity_z"])**2) ** 0.5
             lakebase_client.execute(
                 """INSERT INTO telemetry_realtime (
-                    telemetry_id, timestamp, position_x, position_y, position_z,
+                    tick_seq, simulation_time_s,
+                    position_x, position_y, position_z,
                     velocity_x, velocity_y, velocity_z,
-                    fuel_remaining_kg, hull_integrity, engine_status,
-                    communication_delay_s, ingestion_timestamp
+                    speed_km_s, fuel_remaining_kg, hull_integrity,
+                    engine_status, communication_delay_s, updated_at
                 ) VALUES (
-                    %(telemetry_id)s, %(timestamp)s,
+                    %(tick_seq)s, %(simulation_time_s)s,
                     %(position_x)s, %(position_y)s, %(position_z)s,
                     %(velocity_x)s, %(velocity_y)s, %(velocity_z)s,
-                    %(fuel_remaining_kg)s, %(hull_integrity)s, %(engine_status)s,
-                    %(communication_delay_s)s, %(ingestion_timestamp)s
-                )""",
-                row,
+                    %(speed_km_s)s, %(fuel_remaining_kg)s, %(hull_integrity)s,
+                    %(engine_status)s, %(communication_delay_s)s, NOW()
+                )
+                ON CONFLICT (tick_seq) DO UPDATE SET
+                    simulation_time_s = EXCLUDED.simulation_time_s,
+                    position_x = EXCLUDED.position_x, position_y = EXCLUDED.position_y, position_z = EXCLUDED.position_z,
+                    velocity_x = EXCLUDED.velocity_x, velocity_y = EXCLUDED.velocity_y, velocity_z = EXCLUDED.velocity_z,
+                    speed_km_s = EXCLUDED.speed_km_s, fuel_remaining_kg = EXCLUDED.fuel_remaining_kg,
+                    hull_integrity = EXCLUDED.hull_integrity, engine_status = EXCLUDED.engine_status,
+                    communication_delay_s = EXCLUDED.communication_delay_s, updated_at = NOW()
+                """,
+                {
+                    "tick_seq": seq,
+                    "simulation_time_s": state.timestamp_s,
+                    "position_x": row["position_x"],
+                    "position_y": row["position_y"],
+                    "position_z": row["position_z"],
+                    "velocity_x": row["velocity_x"],
+                    "velocity_y": row["velocity_y"],
+                    "velocity_z": row["velocity_z"],
+                    "speed_km_s": speed,
+                    "fuel_remaining_kg": row["fuel_remaining_kg"],
+                    "hull_integrity": row["hull_integrity"],
+                    "engine_status": row["engine_status"],
+                    "communication_delay_s": row["communication_delay_s"],
+                },
             )
             write_count += 1
 
@@ -458,25 +492,25 @@ ops_per_second = (read_count + write_count) / max(tick_wall_elapsed, 0.001)
 
 lakebase_client.execute(
     """INSERT INTO throughput_metrics (
-        metric_id, source, timestamp, wall_time_s,
-        read_count, write_count, total_ops, ops_per_second,
-        simulated_seconds, telemetry_rows, decision_rows
+        metric_id, component, timestamp, wall_time_s,
+        read_ops, write_ops, total_ops, ops_per_second,
+        sim_seconds_processed, rows_generated, hazards_detected
     ) VALUES (
-        %(metric_id)s, %(source)s, NOW(), %(wall_time_s)s,
-        %(read_count)s, %(write_count)s, %(total_ops)s, %(ops_per_second)s,
-        %(simulated_seconds)s, %(telemetry_rows)s, %(decision_rows)s
+        %(metric_id)s, %(component)s, NOW(), %(wall_time_s)s,
+        %(read_ops)s, %(write_ops)s, %(total_ops)s, %(ops_per_second)s,
+        %(sim_seconds_processed)s, %(rows_generated)s, %(hazards_detected)s
     )""",
     {
         "metric_id": str(uuid.uuid4()),
-        "source": "spacecraft_tick",
+        "component": "spacecraft_tick",
         "wall_time_s": tick_wall_elapsed,
-        "read_count": read_count,
-        "write_count": write_count,
+        "read_ops": read_count,
+        "write_ops": write_count,
         "total_ops": read_count + write_count,
         "ops_per_second": ops_per_second,
-        "simulated_seconds": effective_duration,
-        "telemetry_rows": len(telemetry_rows),
-        "decision_rows": len(notable_decisions),
+        "sim_seconds_processed": effective_duration,
+        "rows_generated": len(telemetry_rows),
+        "hazards_detected": 0,
     },
 )
 write_count += 1

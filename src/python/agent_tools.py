@@ -409,3 +409,50 @@ def tool_get_command_queue() -> str:
         {k: str(v) if isinstance(v, datetime) else v for k, v in row.items()}
         for row in rows
     ])
+
+
+def tool_get_onboard_predictions(limit: int = 5) -> str:
+    """
+    Get the spacecraft's recent onboard trajectory predictions from Lakebase.
+    These are predictions the ship made autonomously during communication delays
+    using either the ML model or physics fallback. Check these BEFORE proposing
+    a maneuver to avoid conflicting with the ship's autonomous corrections.
+
+    Returns:
+        JSON with recent predictions, assessments, actions taken, and accuracy
+    """
+    _ensure_lakebase()
+    rows = lakebase_client.fetch_all(
+        f"SELECT prediction_id, simulation_time_s, "
+        f"  current_pos_x, current_pos_y, current_pos_z, "
+        f"  predicted_pos_x, predicted_pos_y, predicted_pos_z, "
+        f"  prediction_horizon_s, prediction_source, "
+        f"  assessment, action_taken, correction_dv, "
+        f"  actual_pos_x, actual_pos_y, actual_pos_z, "
+        f"  prediction_error_km "
+        f"FROM onboard_predictions "
+        f"ORDER BY simulation_time_s DESC LIMIT {min(limit, 20)}"
+    )
+    # Compute summary stats
+    errors = [float(r["prediction_error_km"]) for r in rows if r.get("prediction_error_km") is not None]
+    corrections = [r for r in rows if r.get("action_taken") not in (None, "none")]
+    ml_count = sum(1 for r in rows if r.get("prediction_source") == "model_serving")
+
+    summary = {
+        "total_predictions": len(rows),
+        "ml_model_predictions": ml_count,
+        "physics_fallback_predictions": len(rows) - ml_count,
+        "predictions_with_accuracy": len(errors),
+        "avg_prediction_error_km": sum(errors) / len(errors) if errors else None,
+        "max_prediction_error_km": max(errors) if errors else None,
+        "autonomous_corrections_applied": len(corrections),
+        "latest_assessment": rows[0].get("assessment") if rows else None,
+    }
+
+    return json.dumps({
+        "summary": summary,
+        "predictions": [
+            {k: str(v) if isinstance(v, datetime) else v for k, v in row.items()}
+            for row in rows
+        ],
+    })

@@ -10,7 +10,28 @@ catalog = dbutils.widgets.get("catalog")
 
 # COMMAND ----------
 
-spark.sql(f"CREATE CATALOG IF NOT EXISTS `{catalog}`")
+# Try standard CREATE CATALOG first; if workspace requires managed location, retry with default storage
+try:
+    spark.sql(f"CREATE CATALOG IF NOT EXISTS `{catalog}`")
+except Exception as e:
+    if "storage root URL" in str(e) or "MANAGED LOCATION" in str(e) or "Default Storage" in str(e):
+        print("Workspace requires managed location — looking up default managed storage")
+        rows = spark.sql("SHOW EXTERNAL LOCATIONS").collect()
+        managed = [r for r in rows if r["name"] == "__databricks_managed_storage_location"]
+        if managed:
+            loc = managed[0]["url"].rstrip("/") + f"/{catalog}"
+            spark.sql(f"CREATE CATALOG IF NOT EXISTS `{catalog}` MANAGED LOCATION '{loc}'")
+        else:
+            # Catalog may already exist — try USE CATALOG before failing
+            try:
+                spark.sql(f"USE CATALOG `{catalog}`")
+                print(f"Catalog `{catalog}` already exists — using it")
+            except Exception:
+                raise RuntimeError(
+                    "Cannot create catalog: no managed storage location found and catalog does not exist"
+                ) from e
+    else:
+        raise
 spark.sql(f"USE CATALOG `{catalog}`")
 
 # Core schemas

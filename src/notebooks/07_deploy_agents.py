@@ -9,15 +9,24 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -q "mlflow[databricks]" "databricks-sdk>=0.81.0" "psycopg[binary]>=3.0"
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
 dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
 catalog = dbutils.widgets.get("catalog")
 
 # COMMAND ----------
 
 import sys, os
-notebook_path = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
-repo_root = "/".join(notebook_path.split("/")[:-2])
-sys.path.insert(0, os.path.join("/Workspace", repo_root, "src", "python"))
+notebook_dir = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
+repo_root = "/".join(notebook_dir.split("/")[:-2])
+python_src = os.path.join("/Workspace", repo_root, "src", "python")
+if not os.path.exists(python_src):
+    for c in [os.path.join(os.getcwd(), d, "src", "python") for d in [".", "..", "../.."]]:
+        if os.path.exists(c): python_src = os.path.abspath(c); break
+sys.path.insert(0, python_src)
 
 import mlflow
 from mlflow.models import ModelConfig

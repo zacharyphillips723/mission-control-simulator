@@ -11,29 +11,10 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-
-# Gravitational constant * mass for key bodies (km^3/s^2)
-GM = {
-    "sun": 1.32712440018e11,
-    "earth": 3.986004418e5,
-    "mars": 4.282837e4,
-    "jupiter": 1.26686534e8,
-    "moon": 4.9048695e3,
-}
-
-# Mean orbital radii in km (simplified circular orbits for demo)
-ORBIT_RADIUS = {
-    "earth": 1.496e8,    # 1 AU
-    "mars": 2.279e8,     # 1.524 AU
-    "jupiter": 7.785e8,  # 5.203 AU
-}
-
-# Orbital periods in seconds
-ORBIT_PERIOD = {
-    "earth": 365.25 * 86400,
-    "mars": 687.0 * 86400,
-    "jupiter": 4332.59 * 86400,
-}
+from mission_constants import (
+    GM, ORBIT_RADIUS, ORBIT_PERIOD,
+    EXHAUST_VELOCITY_KM_S, DRY_MASS_KG,
+)
 
 
 @dataclass
@@ -235,10 +216,17 @@ def compute_delta_v(burn_vector: Vector3, burn_duration_s: float) -> float:
 
 def estimate_fuel_cost(
     delta_v: float,
-    spacecraft_mass_kg: float = 5000.0,
-    exhaust_velocity_km_s: float = 3.0,
+    spacecraft_mass_kg: float = DRY_MASS_KG,
+    exhaust_velocity_km_s: float = EXHAUST_VELOCITY_KM_S,
 ) -> float:
-    """Estimate fuel consumption using the Tsiolkovsky rocket equation."""
+    """Estimate fuel consumption using the Tsiolkovsky rocket equation.
+
+    Negative delta_v is treated as its absolute value (direction doesn't
+    affect fuel cost). Returns 0.0 when delta_v is zero.
+    """
+    delta_v = abs(delta_v)
+    if delta_v == 0:
+        return 0.0
     mass_ratio = math.exp(delta_v / exhaust_velocity_km_s)
     fuel_kg = spacecraft_mass_kg * (mass_ratio - 1)
     return fuel_kg

@@ -5,18 +5,61 @@ resources:
       description: "NASA-style mission control dashboard for spacecraft navigation simulation"
       source_code_path: ../app
       config:
-        - name: CATALOG
-          value: ${var.catalog}
-        - name: DATABRICKS_HOST
-          value: ${workspace.host}
-        - name: LAKEBASE_PROJECT_ID
-          value: ${var.lakebase_project_id}
-        - name: LAKEBASE_BRANCH_ID
-          value: production
+        env:
+          - name: CATALOG
+            value: ${var.catalog}
+          - name: DATABRICKS_HOST
+            value: ${workspace.host}
+          - name: LAKEBASE_PROJECT_ID
+            value: ${var.lakebase_project_id}
+          - name: LAKEBASE_BRANCH_ID
+            value: production
+          - name: WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: SIMULATION_JOB_ID
+            value: ${resources.jobs.mission_control_simulation_loop.id}
+          - name: RETRAIN_JOB_ID
+            value: ${resources.jobs.mission_control_retrain.id}
+          - name: TRAJECTORY_MODEL_ENDPOINT
+            value: trajectory_prediction
+          - name: FUEL_MODEL_ENDPOINT
+            value: fuel_estimation
+          - name: HAZARD_RISK_MODEL_ENDPOINT
+            value: hazard_risk
+          - name: MANEUVER_RANK_MODEL_ENDPOINT
+            value: maneuver_ranking
+          - name: DELAY_POLICY_MODEL_ENDPOINT
+            value: delay_aware
 
       resources:
-        - name: mission-control-sql
-          description: "SQL warehouse for querying mission data"
+        # NOTE: Custom model endpoints (trajectory, fuel, hazard, maneuver, delay)
+        # are commented out until registered in UC. The app handles their absence
+        # gracefully. Re-enable after running the model training notebook.
+        # - name: trajectory-model
+        #   serving_endpoint:
+        #     name: trajectory_prediction
+        #     permission: CAN_QUERY
+        # - name: fuel-model
+        #   serving_endpoint:
+        #     name: fuel_estimation
+        #     permission: CAN_QUERY
+        # - name: hazard-risk-model
+        #   serving_endpoint:
+        #     name: hazard_risk
+        #     permission: CAN_QUERY
+        # - name: maneuver-rank-model
+        #   serving_endpoint:
+        #     name: maneuver_ranking
+        #     permission: CAN_QUERY
+        # - name: delay-policy-model
+        #   serving_endpoint:
+        #     name: delay_aware
+        #     permission: CAN_QUERY
+        - name: llm-llama
+          serving_endpoint:
+            name: databricks-meta-llama-3-3-70b-instruct
+            permission: CAN_QUERY
+        - name: sql-warehouse
           sql_warehouse:
             id: ${var.warehouse_id}
             permission: CAN_USE

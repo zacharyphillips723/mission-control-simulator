@@ -8,10 +8,16 @@ command:
 
 env:
   - name: CATALOG
-    description: "Unity Catalog catalog name"
+    value: "catalog_control_gyw546"
   - name: DATABRICKS_HOST
-    description: "Databricks workspace URL"
+    value: "https://adb-7405607353957441.1.azuredatabricks.net"
   - name: LAKEBASE_PROJECT_ID
-    description: "Lakebase Autoscaling project ID"
+    value: "mission-control"
   - name: LAKEBASE_BRANCH_ID
-    description: "Lakebase branch (default: production)"
+    value: "production"
+  - name: WAREHOUSE_ID
+    value: "dfa2d4c7b330f867"
+  - name: SIMULATION_JOB_ID
+    value: "89935679578653"
+  - name: RETRAIN_JOB_ID
+    value: "1079020504092201"

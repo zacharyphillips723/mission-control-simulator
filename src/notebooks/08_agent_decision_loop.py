@@ -17,6 +17,11 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -q "mlflow[databricks]" "psycopg[binary]>=3.0" "databricks-sdk>=0.81.0"
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
 dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
 dbutils.widgets.text("lakebase_project_id", "mission-control", "Lakebase Project ID")
 catalog = dbutils.widgets.get("catalog")
@@ -27,9 +32,13 @@ lakebase_project_id = dbutils.widgets.get("lakebase_project_id")
 import sys, os, json, uuid, time
 from datetime import datetime, timezone
 
-notebook_path = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
-repo_root = "/".join(notebook_path.split("/")[:-2])
-sys.path.insert(0, os.path.join("/Workspace", repo_root, "src", "python"))
+notebook_dir = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
+repo_root = "/".join(notebook_dir.split("/")[:-2])
+python_src = os.path.join("/Workspace", repo_root, "src", "python")
+if not os.path.exists(python_src):
+    for c in [os.path.join(os.getcwd(), d, "src", "python") for d in [".", "..", "../.."]]:
+        if os.path.exists(c): python_src = os.path.abspath(c); break
+sys.path.insert(0, python_src)
 
 # COMMAND ----------
 
@@ -77,10 +86,18 @@ Your job is to evaluate the spacecraft's trajectory and recommend course correct
 
 RESPONSIBILITIES:
 1. Get current spacecraft state using get_current_state
-2. Propagate trajectory 1-2 hours ahead using propagate_trajectory to assess drift
-3. Review candidate maneuvers using get_candidate_maneuvers
-4. Estimate fuel costs for promising maneuvers using estimate_fuel_for_burn
-5. Recommend the optimal maneuver considering fuel budget and mission timeline
+2. Check onboard predictions using get_onboard_predictions — the ship makes autonomous ML predictions and may have already applied corrections during comm delays
+3. Propagate trajectory 1-2 hours ahead using propagate_trajectory to assess drift
+4. Call predict_trajectory (ML model) and COMPARE with physics propagation — if the two diverge significantly, flag a potential anomaly
+5. Review candidate maneuvers using get_candidate_maneuvers
+6. Estimate fuel costs for promising maneuvers using estimate_fuel_for_burn
+7. Recommend the optimal maneuver considering fuel budget, onboard corrections already applied, and mission timeline
+
+ONBOARD PREDICTION AWARENESS:
+- The ship runs trajectory predictions every ~60 seconds autonomously
+- It may have already applied micro-corrections — account for these before recommending new burns
+- If onboard prediction accuracy is degrading, recommend model retraining
+- Compare ML prediction vs. physics propagation: agreement = high confidence, divergence = potential anomaly
 
 RULES:
 - Never recommend a burn that leaves fuel below 50 kg (emergency reserve)
@@ -93,13 +110,16 @@ OUTPUT: Respond with a JSON object containing:
   "decision_type": "maneuver_recommendation",
   "recommended_maneuver": {"maneuver_id": "...", "delta_v": ..., "fuel_cost_kg": ..., "burn_vector_x": ..., "burn_vector_y": ..., "burn_vector_z": ..., "burn_duration_s": ...},
   "trajectory_assessment": "brief description of current trajectory",
+  "prediction_comparison": {"physics_agrees_with_ml": true|false, "divergence_km": ..., "anomaly_flag": false},
+  "onboard_status": {"predictions_made": ..., "corrections_applied": ..., "avg_accuracy_km": ...},
   "fuel_status": {"current_kg": ..., "available_for_maneuvers_kg": ...},
   "reasoning": "2-3 sentences explaining your recommendation",
   "confidence": 0.0-1.0
 }""",
-    "tools": ["propagate_trajectory", "calculate_gravity_assist", "estimate_fuel_for_burn",
+    "tools": ["propagate_trajectory", "predict_trajectory", "get_onboard_predictions",
+              "calculate_gravity_assist", "estimate_fuel_for_burn",
               "get_current_state", "get_candidate_maneuvers"],
-    "max_iterations": 8,
+    "max_iterations": 10,
     "temperature": 0.1,
 }
 
@@ -173,22 +193,27 @@ MISSION_COMMANDER_CONFIG = {
 You are the senior decision-maker who synthesizes inputs from your team.
 
 YOUR TEAM'S REPORTS ARE IN THE "Inputs from Other Agents" SECTION:
-- flight_dynamics: trajectory analysis and maneuver recommendations
+- flight_dynamics: trajectory analysis, maneuver recommendations, and ML vs physics comparison
 - hazard_assessment: threat identification and risk levels
 - communications: delay-adjusted command timing
 
 RESPONSIBILITIES:
 1. Review all agent inputs provided in the context
 2. Get current state using get_current_state to verify
-3. Make a GO/NO-GO decision on any proposed maneuvers
-4. If hazards are CRITICAL, prioritize evasion over fuel efficiency
-5. Generate a clear recommendation for the human operator
+3. Check onboard predictions using get_onboard_predictions to see what the ship has been doing autonomously
+4. Make a GO/NO-GO decision on any proposed maneuvers
+5. If hazards are CRITICAL, prioritize evasion over fuel efficiency
+6. If FDO flagged ML/physics divergence (anomaly), consider holding until understood
+7. Generate a clear recommendation for the human operator
 
 DECISION FRAMEWORK:
 - Safety first: CRITICAL hazards → prioritize evasion
 - Fuel: never approve below 50 kg emergency reserve
 - Comm delay > 15 min → require higher confidence for GO
+- ML/physics divergence → consider HOLD until anomaly is understood
+- Ship autonomous corrections → account for them (don't double-correct)
 - When agents disagree, explain the tradeoff
+- If prediction accuracy is degrading, recommend model retrain
 
 SPEAK LIKE A MISSION COMMANDER:
 - Lead with the decision: "RECOMMEND GO FOR BURN" or "RECOMMEND HOLD"
@@ -204,11 +229,12 @@ OUTPUT: Respond with a JSON object containing:
   "key_factors": ["factor1", "factor2"],
   "risks": ["risk1", "risk2"],
   "confidence": 0.0-1.0,
-  "operator_action_required": "what the human should do"
+  "operator_action_required": "what the human should do",
+  "model_retrain_recommended": false
 }""",
     "tools": ["get_current_state", "get_active_hazards", "get_candidate_maneuvers",
-              "propagate_trajectory", "check_collision", "estimate_fuel_for_burn",
-              "calculate_communication_delay"],
+              "get_onboard_predictions", "propagate_trajectory", "check_collision",
+              "estimate_fuel_for_burn", "calculate_communication_delay"],
     "max_iterations": 10,
     "temperature": 0.2,
 }
@@ -383,24 +409,30 @@ total_ops = (
 )
 
 tick_elapsed = time.time() - tick_start
-lakebase_client.execute(
-    """INSERT INTO throughput_metrics
-       (metric_id, component, recorded_at, elapsed_s, model_calls,
-        db_operations, total_operations, ops_per_second,
-        error_count, retry_count, cache_hits)
-       VALUES (%(metric_id)s, %(component)s, NOW(), %(elapsed_s)s, %(model_calls)s,
-               %(db_operations)s, %(total_operations)s, %(ops_per_second)s,
-               0, 0, 0)""",
-    {
-        "metric_id": str(uuid.uuid4()),
-        "component": "agent_loop",
-        "elapsed_s": tick_elapsed,
-        "model_calls": inference_logger.call_count,
-        "db_operations": len(tick_result.decisions) + len(tick_result.messages),
-        "total_operations": total_ops,
-        "ops_per_second": total_ops / max(tick_elapsed, 0.001),
-    },
-)
+try:
+    lakebase_client.execute(
+        """INSERT INTO throughput_metrics (
+            metric_id, component, timestamp, wall_time_s,
+            read_ops, write_ops, total_ops, ops_per_second,
+            sim_seconds_processed, rows_generated, hazards_detected
+        ) VALUES (
+            %(metric_id)s, %(component)s, NOW(), %(wall_time_s)s,
+            %(read_ops)s, %(write_ops)s, %(total_ops)s, %(ops_per_second)s,
+            0, %(rows_generated)s, 0
+        )""",
+        {
+            "metric_id": str(uuid.uuid4()),
+            "component": "agent_loop",
+            "wall_time_s": tick_elapsed,
+            "read_ops": len(tick_result.decisions),
+            "write_ops": len(tick_result.messages),
+            "total_ops": total_ops,
+            "ops_per_second": total_ops / max(tick_elapsed, 0.001),
+            "rows_generated": len(tick_result.decisions) + len(tick_result.messages),
+        },
+    )
+except Exception as e:
+    print(f"[AGENT] Throughput metrics write skipped: {e}")
 
 print(f"\nThroughput: {total_ops} total operations")
 print(f"  Model inference calls: {inference_logger.call_count}")

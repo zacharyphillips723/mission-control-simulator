@@ -39,6 +39,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.postgres import (
     Endpoint,
     EndpointSpec,
+    EndpointType,
     FieldMask,
     Project,
     ProjectSpec,
@@ -95,6 +96,7 @@ if current_min != min_cu or current_max != max_cu:
         endpoint=Endpoint(
             name=ep_name,
             spec=EndpointSpec(
+                endpoint_type=EndpointType.ENDPOINT_TYPE_READ_WRITE,
                 autoscaling_limit_min_cu=min_cu,
                 autoscaling_limit_max_cu=max_cu,
             ),
@@ -339,6 +341,180 @@ CREATE TABLE IF NOT EXISTS throughput_metrics (
 """)
 print("throughput_metrics created")
 
+# --- Simulation Sessions ---
+cur.execute("""
+CREATE TABLE IF NOT EXISTS simulation_sessions (
+    session_id TEXT NOT NULL,
+    session_name TEXT NOT NULL DEFAULT 'Odyssey Return',
+    scenario_type TEXT DEFAULT 'default',
+    initial_position_x DOUBLE PRECISION,
+    initial_position_y DOUBLE PRECISION,
+    initial_position_z DOUBLE PRECISION,
+    initial_velocity_x DOUBLE PRECISION,
+    initial_velocity_y DOUBLE PRECISION,
+    initial_velocity_z DOUBLE PRECISION,
+    initial_fuel_kg DOUBLE PRECISION,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at TIMESTAMPTZ,
+    duration_wall_seconds DOUBLE PRECISION,
+    duration_sim_seconds DOUBLE PRECISION,
+    max_time_scale_used DOUBLE PRECISION DEFAULT 1.0,
+    final_distance_to_earth_km DOUBLE PRECISION,
+    total_burns_executed INT DEFAULT 0,
+    total_fuel_used_kg DOUBLE PRECISION DEFAULT 0.0,
+    total_corrections INT DEFAULT 0,
+    total_hazards_encountered INT DEFAULT 0,
+    total_agent_decisions INT DEFAULT 0,
+    total_predictions_made INT DEFAULT 0,
+    prediction_accuracy_avg DOUBLE PRECISION,
+    outcome TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (session_id)
+)
+""")
+print("simulation_sessions created")
+
+# --- Onboard Predictions (ML-based trajectory forecasts from the spacecraft) ---
+cur.execute("""
+CREATE TABLE IF NOT EXISTS onboard_predictions (
+    prediction_id TEXT NOT NULL,
+    simulation_time_s DOUBLE PRECISION NOT NULL,
+    current_pos_x DOUBLE PRECISION NOT NULL,
+    current_pos_y DOUBLE PRECISION NOT NULL,
+    current_pos_z DOUBLE PRECISION NOT NULL,
+    current_vel_x DOUBLE PRECISION NOT NULL,
+    current_vel_y DOUBLE PRECISION NOT NULL,
+    current_vel_z DOUBLE PRECISION NOT NULL,
+    predicted_pos_x DOUBLE PRECISION NOT NULL,
+    predicted_pos_y DOUBLE PRECISION NOT NULL,
+    predicted_pos_z DOUBLE PRECISION NOT NULL,
+    prediction_horizon_s DOUBLE PRECISION DEFAULT 60.0,
+    prediction_source TEXT DEFAULT 'physics',
+    assessment TEXT,
+    action_taken TEXT,
+    correction_dv DOUBLE PRECISION DEFAULT 0.0,
+    actual_pos_x DOUBLE PRECISION,
+    actual_pos_y DOUBLE PRECISION,
+    actual_pos_z DOUBLE PRECISION,
+    prediction_error_km DOUBLE PRECISION,
+    backfilled_at TIMESTAMPTZ,
+    session_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (prediction_id)
+)
+""")
+print("onboard_predictions created")
+
+# --- Captain Decisions (ship captain autonomous decisions) ---
+cur.execute("""
+CREATE TABLE IF NOT EXISTS captain_decisions (
+    decision_id TEXT NOT NULL,
+    simulation_time_s DOUBLE PRECISION NOT NULL,
+    session_id TEXT,
+    action TEXT NOT NULL,
+    priority_level INT,
+    reasoning TEXT,
+    override_of_command_id TEXT,
+    original_command_summary TEXT,
+    captain_alternative_summary TEXT,
+    delta_v DOUBLE PRECISION DEFAULT 0.0,
+    fuel_cost_kg DOUBLE PRECISION DEFAULT 0.0,
+    alert_level TEXT DEFAULT 'green',
+    confidence DOUBLE PRECISION DEFAULT 0.85,
+    elapsed_ms DOUBLE PRECISION DEFAULT 0.0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (decision_id)
+)
+""")
+print("captain_decisions created")
+
+# --- Captain-MC Dialogue ---
+cur.execute("""
+CREATE TABLE IF NOT EXISTS captain_mc_dialogue (
+    dialogue_id TEXT NOT NULL,
+    simulation_time_s DOUBLE PRECISION NOT NULL,
+    session_id TEXT,
+    direction TEXT NOT NULL,
+    speaker TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    related_decision_id TEXT,
+    priority INT DEFAULT 5,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (dialogue_id)
+)
+""")
+print("captain_mc_dialogue created")
+
+# --- Mission Events (event sourcing) ---
+cur.execute("""
+CREATE TABLE IF NOT EXISTS mission_events (
+    event_id TEXT NOT NULL,
+    session_id TEXT,
+    event_type TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    simulation_time_s DOUBLE PRECISION DEFAULT 0.0,
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (event_id)
+)
+""")
+print("mission_events created")
+
+# --- Candidate Maneuvers (agent-proposed burns for approval/rejection) ---
+cur.execute("""
+CREATE TABLE IF NOT EXISTS candidate_maneuvers (
+    maneuver_id TEXT NOT NULL,
+    session_id TEXT,
+    ranking INT DEFAULT 0,
+    name TEXT,
+    description TEXT,
+    burn_vector_x DOUBLE PRECISION DEFAULT 0.0,
+    burn_vector_y DOUBLE PRECISION DEFAULT 0.0,
+    burn_vector_z DOUBLE PRECISION DEFAULT 0.0,
+    burn_duration_s DOUBLE PRECISION DEFAULT 0.0,
+    delta_v DOUBLE PRECISION DEFAULT 0.0,
+    fuel_cost_kg DOUBLE PRECISION DEFAULT 0.0,
+    risk_reduction DOUBLE PRECISION DEFAULT 0.0,
+    feasibility TEXT DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (maneuver_id)
+)
+""")
+print("candidate_maneuvers created")
+
+# --- Add session_id to all per-run and state tables ---
+session_id_tables = [
+    "mission_state",
+    "simulation_clock",
+    "command_queue",
+    "active_hazards",
+    "telemetry_realtime",
+    "spacecraft_autopilot_state",
+    "ground_state",
+    "agent_messages_realtime",
+    "throughput_metrics",
+]
+for tbl in session_id_tables:
+    try:
+        cur.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS session_id TEXT")
+        print(f"  + session_id added to {tbl}")
+    except Exception as e:
+        print(f"  ~ skipped {tbl}: {e}")
+
+print("session_id column migration complete")
+
+# --- Add mission outcome columns to mission_state ---
+try:
+    cur.execute("ALTER TABLE mission_state ADD COLUMN IF NOT EXISTS mission_outcome TEXT")
+    cur.execute("ALTER TABLE mission_state ADD COLUMN IF NOT EXISTS mission_outcome_detail TEXT")
+    print("  + mission_outcome columns added to mission_state")
+except Exception as e:
+    print(f"  ~ skipped mission_outcome columns: {e}")
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -349,17 +525,34 @@ print("throughput_metrics created")
 indexes = [
     "CREATE INDEX IF NOT EXISTS idx_command_queue_status ON command_queue (status)",
     "CREATE INDEX IF NOT EXISTS idx_command_queue_created ON command_queue (created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_command_queue_session ON command_queue (session_id)",
     "CREATE INDEX IF NOT EXISTS idx_active_hazards_risk ON active_hazards (risk_score DESC)",
     "CREATE INDEX IF NOT EXISTS idx_agent_memory_agent ON agent_memory (agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_rt_time ON telemetry_realtime (simulation_time_s DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_telemetry_rt_session ON telemetry_realtime (session_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_msgs_created ON agent_messages_realtime (created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_throughput_ts ON throughput_metrics (timestamp DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_status ON simulation_sessions (status)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_started ON simulation_sessions (started_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_predictions_session ON onboard_predictions (session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_predictions_time ON onboard_predictions (simulation_time_s DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_captain_session ON captain_decisions (session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_captain_created ON captain_decisions (created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_captain_dialogue_session ON captain_mc_dialogue (session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_captain_dialogue_created ON captain_mc_dialogue (created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_mission_events_session ON mission_events (session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_mission_events_created ON mission_events (created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_mission_events_type ON mission_events (event_type)",
 ]
 
 for idx_sql in indexes:
-    cur.execute(idx_sql)
-    idx_name = idx_sql.split("IF NOT EXISTS ")[1].split(" ON")[0]
-    print(f"Index {idx_name} created")
+    try:
+        cur.execute(idx_sql)
+        idx_name = idx_sql.split("IF NOT EXISTS ")[1].split(" ON")[0]
+        print(f"Index {idx_name} created")
+    except Exception as e:
+        idx_name = idx_sql.split("IF NOT EXISTS ")[1].split(" ON")[0]
+        print(f"  ~ skipped index {idx_name}: {e}")
 
 # COMMAND ----------
 
@@ -396,7 +589,7 @@ print("Connection closed")
 # MAGIC | **Branch** | `production` (always-on, no scale-to-zero) |
 # MAGIC | **Compute** | Autoscaling {min_cu}–{max_cu} CU ({min_cu*2:.0f}–{max_cu*2:.0f} GB RAM) |
 # MAGIC | **Database** | `databricks_postgres` |
-# MAGIC | **Tables** | 10 operational tables in `public` schema |
+# MAGIC | **Tables** | 12 operational tables in `public` schema |
 # MAGIC | **Access** | Direct psycopg from the Databricks App (OAuth token refresh) |
 # MAGIC
 # MAGIC The app connects directly to this Postgres instance for sub-10ms ops queries,

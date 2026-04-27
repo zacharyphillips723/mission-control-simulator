@@ -18,8 +18,11 @@ targets:
   dev:
     mode: development
     default: true
+    workspace:
+      profile: mission-control-azure
     variables:
-      catalog: mission_control_dev
+      catalog: catalog_control_gyw546
+      warehouse_id: dfa2d4c7b330f867
 
   staging:
     variables:

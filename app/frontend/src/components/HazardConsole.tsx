@@ -106,9 +106,16 @@ function HazardIcon({ type }: { type: string }) {
 
 interface Props {
   hazards: Hazard[];
+  shipPosition?: { x: number; y: number } | null;
 }
 
-const HazardConsole: React.FC<Props> = ({ hazards }) => {
+function dynamicRisk(h: Hazard, shipPos?: { x: number; y: number } | null): number {
+  if (!shipPos || h.position_x == null || h.position_y == null) return h.risk_score;
+  const dist = Math.sqrt((h.position_x - shipPos.x) ** 2 + (h.position_y - shipPos.y) ** 2);
+  return Math.max(0, Math.min(1, 0.95 - (dist / 1e8) * 0.5));
+}
+
+const HazardConsole: React.FC<Props> = ({ hazards, shipPosition }) => {
   return (
     <div style={styles.panel}>
       <div style={styles.title}>
@@ -125,7 +132,8 @@ const HazardConsole: React.FC<Props> = ({ hazards }) => {
           </div>
         )}
         {hazards.map((h) => {
-          const rc = riskColor(h.risk_score);
+          const risk = dynamicRisk(h, shipPosition);
+          const rc = riskColor(risk);
           return (
             <div
               key={h.id}
@@ -147,12 +155,12 @@ const HazardConsole: React.FC<Props> = ({ hazards }) => {
 
               <div style={styles.row}>
                 <span style={{ fontSize: 10, color: "#6b7fa3", width: 60 }}>
-                  Risk {(h.risk_score * 100).toFixed(0)}%
+                  Risk {(risk * 100).toFixed(0)}%
                 </span>
                 <div style={styles.riskTrack}>
                   <div
                     style={{
-                      width: `${h.risk_score * 100}%`,
+                      width: `${risk * 100}%`,
                       height: "100%",
                       background: rc,
                       borderRadius: 3,

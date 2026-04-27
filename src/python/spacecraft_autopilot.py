@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from mission_constants import EXHAUST_VELOCITY_KM_S, DRY_MASS_KG
 from physics_engine import (
     SpacecraftState,
     Vector3,
@@ -284,10 +285,15 @@ class SpacecraftAutopilot:
 
         fuel_cost = estimate_fuel_cost(needed_dv)
 
-        # Check fuel availability
+        # Check fuel availability — use proper Tsiolkovsky inverse
         if fuel_cost > state.fuel_remaining_kg:
-            fuel_cost = state.fuel_remaining_kg
-            needed_dv = fuel_cost * 0.5  # rough inverse
+            available_fuel = state.fuel_remaining_kg * 0.8  # reserve 20%
+            fuel_cost = min(fuel_cost, available_fuel)
+            # Inverse rocket equation: dv = ve * ln(1 + fuel / dry_mass)
+            needed_dv = min(
+                MAX_EVASION_DELTA_V,
+                EXHAUST_VELOCITY_KM_S * math.log(1 + max(0, available_fuel) / DRY_MASS_KG),
+            )
             burn_accel_mag = needed_dv / burn_duration
             burn_vector = perp * burn_accel_mag
 

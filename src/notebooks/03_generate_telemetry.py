@@ -6,6 +6,11 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -q "psycopg[binary]>=3.0" "databricks-sdk>=0.81.0"
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
 dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
 dbutils.widgets.text("duration_hours", "24", "Simulation Duration (hours)")
 dbutils.widgets.text("batch_size_s", "3600", "Batch size in seconds")
@@ -27,9 +32,23 @@ lakebase_project_id = dbutils.widgets.get("lakebase_project_id")
 
 import sys, os
 # Add the python source directory to path
-notebook_path = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
-repo_root = "/".join(notebook_path.split("/")[:-2])
-sys.path.insert(0, os.path.join("/Workspace", repo_root, "src", "python"))
+notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+notebook_dir = os.path.dirname(notebook_path)
+repo_root = "/".join(notebook_dir.split("/")[:-2])
+python_src = os.path.join("/Workspace", repo_root, "src", "python")
+# Fallback: try relative to CWD if workspace path doesn't exist
+if not os.path.exists(python_src):
+    cwd = os.getcwd()
+    for candidate in [
+        os.path.join(cwd, "src", "python"),
+        os.path.join(cwd, "..", "src", "python"),
+        os.path.join(cwd, "..", "..", "src", "python"),
+    ]:
+        if os.path.exists(candidate):
+            python_src = os.path.abspath(candidate)
+            break
+print(f"Python source path: {python_src}")
+sys.path.insert(0, python_src)
 
 # COMMAND ----------
 
@@ -140,7 +159,8 @@ else:
         man_df = spark.createDataFrame(maneuvers)
         man_df = man_df.withColumn("generated_at", F.to_timestamp("generated_at"))
         man_df = man_df.withColumn("mission_profile", F.lit(profile.name))
-        man_df.write.mode("append").saveAsTable(f"`{catalog}`.navigation.candidate_maneuvers")
+        man_df = man_df.withColumn("ranking", F.col("ranking").cast("int"))
+        man_df.write.mode("append").option("mergeSchema", "true").saveAsTable(f"`{catalog}`.navigation.candidate_maneuvers")
 
         profile_summary.append({
             "profile": profile.name,
@@ -174,7 +194,8 @@ if mode == "single":
     maneuvers = generate_candidate_maneuvers(state, num_candidates=10)
     man_df = spark.createDataFrame(maneuvers)
     man_df = man_df.withColumn("generated_at", F.to_timestamp("generated_at"))
-    man_df.write.mode("append").saveAsTable(f"`{catalog}`.navigation.candidate_maneuvers")
+    man_df = man_df.withColumn("ranking", F.col("ranking").cast("int"))
+    man_df.write.mode("append").option("mergeSchema", "true").saveAsTable(f"`{catalog}`.navigation.candidate_maneuvers")
 
     print(f"Generated {len(maneuvers)} candidate maneuvers")
     display(man_df.select("ranking", "delta_v", "fuel_cost_kg", "risk_reduction_score", "feasibility_score"))
@@ -204,25 +225,25 @@ else:
 
 lakebase_client.execute(
     """
-    INSERT INTO mission_state VALUES (
-        %(mission_id)s,
-        %(mission_name)s,
-        %(status)s,
-        %(mission_start_time)s,
-        %(pos_x)s,
-        %(pos_y)s,
-        %(pos_z)s,
-        %(vel_x)s,
-        %(vel_y)s,
-        %(vel_z)s,
-        %(fuel_remaining_kg)s,
-        %(hull_integrity_pct)s,
-        %(system_status)s,
-        %(comm_delay_s)s,
-        NULL,
-        %(radiation_exposure)s,
-        NOW()
+    INSERT INTO mission_state (state_id, mission_name, mission_status, timestamp,
+        position_x, position_y, position_z, velocity_x, velocity_y, velocity_z,
+        fuel_remaining_kg, hull_integrity, engine_status, communication_delay_s,
+        active_plan_id, mission_elapsed_s, updated_at)
+    VALUES (
+        %(mission_id)s, %(mission_name)s, %(status)s, %(mission_start_time)s,
+        %(pos_x)s, %(pos_y)s, %(pos_z)s, %(vel_x)s, %(vel_y)s, %(vel_z)s,
+        %(fuel_remaining_kg)s, %(hull_integrity_pct)s, %(system_status)s,
+        %(comm_delay_s)s, NULL, 0.0, NOW()
     )
+    ON CONFLICT (state_id) DO UPDATE SET
+        mission_name = EXCLUDED.mission_name,
+        mission_status = EXCLUDED.mission_status,
+        timestamp = EXCLUDED.timestamp,
+        position_x = EXCLUDED.position_x, position_y = EXCLUDED.position_y, position_z = EXCLUDED.position_z,
+        velocity_x = EXCLUDED.velocity_x, velocity_y = EXCLUDED.velocity_y, velocity_z = EXCLUDED.velocity_z,
+        fuel_remaining_kg = EXCLUDED.fuel_remaining_kg, hull_integrity = EXCLUDED.hull_integrity,
+        engine_status = EXCLUDED.engine_status, communication_delay_s = EXCLUDED.communication_delay_s,
+        mission_elapsed_s = EXCLUDED.mission_elapsed_s, updated_at = NOW()
     """,
     {
         "mission_id": 1,
@@ -239,7 +260,6 @@ lakebase_client.execute(
         "hull_integrity_pct": 100.0,
         "system_status": "nominal",
         "comm_delay_s": _delay,
-        "radiation_exposure": 0.0,
     },
 )
 
@@ -254,15 +274,14 @@ print("Mission state initialized in Lakebase")
 
 lakebase_client.execute(
     """
-    INSERT INTO simulation_clock VALUES (
-        %(clock_id)s,
-        %(current_time)s,
-        %(time_scale)s,
-        %(is_paused)s,
-        NULL,
-        NULL,
-        %(elapsed_s)s
-    )
+    INSERT INTO simulation_clock (clock_id, simulation_time, time_scale, is_running,
+        started_at, paused_at, total_elapsed_s)
+    VALUES (%(clock_id)s, %(current_time)s, %(time_scale)s, %(is_paused)s, NULL, NULL, %(elapsed_s)s)
+    ON CONFLICT (clock_id) DO UPDATE SET
+        simulation_time = EXCLUDED.simulation_time,
+        time_scale = EXCLUDED.time_scale,
+        is_running = EXCLUDED.is_running,
+        total_elapsed_s = EXCLUDED.total_elapsed_s
     """,
     {
         "clock_id": 1,

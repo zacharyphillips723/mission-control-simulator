@@ -16,6 +16,11 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -q "psycopg[binary]>=3.0" "databricks-sdk>=0.81.0"
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
 dbutils.widgets.text("catalog", "mission_control_dev", "Catalog Name")
 dbutils.widgets.text("lakebase_project_id", "mission-control", "Lakebase Project ID")
 
@@ -25,9 +30,13 @@ lakebase_project_id = dbutils.widgets.get("lakebase_project_id")
 # COMMAND ----------
 
 import sys, os, time, uuid, math, random
-notebook_path = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
-repo_root = "/".join(notebook_path.split("/")[:-2])
-sys.path.insert(0, os.path.join("/Workspace", repo_root, "src", "python"))
+notebook_dir = os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
+repo_root = "/".join(notebook_dir.split("/")[:-2])
+python_src = os.path.join("/Workspace", repo_root, "src", "python")
+if not os.path.exists(python_src):
+    for c in [os.path.join(os.getcwd(), d, "src", "python") for d in [".", "..", "../.."]]:
+        if os.path.exists(c): python_src = os.path.abspath(c); break
+sys.path.insert(0, python_src)
 
 from physics_engine import (
     SpacecraftState, Vector3, BODIES,
@@ -321,7 +330,8 @@ maneuvers = generate_candidate_maneuvers(ground_view_state, num_candidates=5)
 if maneuvers:
     man_df = spark.createDataFrame(maneuvers)
     man_df = man_df.withColumn("generated_at", F.to_timestamp("generated_at"))
-    man_df.write.mode("append").saveAsTable(f"`{catalog}`.navigation.candidate_maneuvers")
+    man_df = man_df.withColumn("ranking", F.col("ranking").cast("int"))
+    man_df.write.option("mergeSchema", "false").mode("append").saveAsTable(f"`{catalog}`.navigation.candidate_maneuvers")
     write_count += 1
     print(f"[GROUND] Generated {len(maneuvers)} candidate maneuvers (based on delayed state)")
 
@@ -389,28 +399,23 @@ ops_per_second = (read_count + write_count) / max(tick_wall_elapsed, 0.001)
 try:
     lakebase_client.execute(
         """INSERT INTO throughput_metrics (
-            metric_id, tick_type, timestamp,
-            wall_time_s, read_ops, write_ops,
-            total_ops, ops_per_second,
-            lakebase_read_ops, lakebase_write_ops,
-            hazards_detected
+            metric_id, component, timestamp, wall_time_s,
+            read_ops, write_ops, total_ops, ops_per_second,
+            sim_seconds_processed, rows_generated, hazards_detected
         ) VALUES (
-            %(metric_id)s, %(tick_type)s, NOW(),
-            %(wall_time_s)s, %(read_ops)s, %(write_ops)s,
-            %(total_ops)s, %(ops_per_second)s,
-            %(lakebase_read_ops)s, %(lakebase_write_ops)s,
-            %(hazards_detected)s
+            %(metric_id)s, %(component)s, NOW(), %(wall_time_s)s,
+            %(read_ops)s, %(write_ops)s, %(total_ops)s, %(ops_per_second)s,
+            0, %(rows_generated)s, %(hazards_detected)s
         )""",
         {
             "metric_id": str(uuid.uuid4()),
-            "tick_type": "ground_tick",
+            "component": "ground_tick",
             "wall_time_s": tick_wall_elapsed,
             "read_ops": read_count,
             "write_ops": write_count,
             "total_ops": read_count + write_count,
             "ops_per_second": ops_per_second,
-            "lakebase_read_ops": 0,
-            "lakebase_write_ops": 0,
+            "rows_generated": write_count,
             "hazards_detected": len(new_hazards),
         },
     )
